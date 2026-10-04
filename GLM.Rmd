@@ -1,0 +1,1056 @@
+---
+title: "Analiza ryzyka kredytowego na zbiorze danych German Credit Data"
+author: Weronika Dolatowska, Agnieszka Dzienis, Aleksandra Hukaluk, Stanisław Starosta
+output:
+  pdf_document: default
+---
+
+```{r include=FALSE}
+knitr::opts_chunk$set(fig.width = 8, fig.height = 6)
+```
+
+### Załadowanie pakietów
+```{r message=FALSE, warning=FALSE}
+library("lmtest") # testy LR i Walda globalne
+library("car") # funkcja vif()
+library("pscl") # pseudo-R2 funkcja pR2()
+library("pROC") # funkcje roc, auc
+library("vcd") # funkcja assocstats() - współczynniki kontyngencji
+library("ggplot2") # wykresy - funkcja ggplot()
+library("dplyr") # modyfikacje zbioru danych
+library("AICcmodavg") # funkcja aicc
+library("ICglm") # funkcja hqic
+```
+
+
+## Wczytanie danych
+
+```{r}
+dane <- read.table("german_credit.csv", header = TRUE, sep = ",", dec = ",", stringsAsFactors = TRUE)
+```
+
+## Przygotowanie zmiennych
+
+```{r echo=FALSE}
+summary(dane)
+```
+
+
+```{r}
+dane <- dane %>% select(-"rata_proc_dochodu", -"zamieszkanie_lata", -"liczba_osob_na_utrzymaniu")
+```
+
+```{r}
+dane$pracownik_zagraniczny <- ifelse(dane$pracownik_zagraniczny == "tak", 1, 0)
+
+dane$telefon <- ifelse(dane$telefon == "jest", 1, 0)
+
+dane$status_plec <- ifelse(dane$status_plec == "kobieta", 0, 1)
+
+dane <- dane %>% rename(plec = status_plec)
+
+dane$klasa <- ifelse(dane$klasa == "dobry", 1, 0)
+
+dane$klasa <- as.factor(dane$klasa)
+```
+
+```{r echo=FALSE}
+summary(dane)
+```
+
+# Analiza wstępna
+
+## Wykresy pudełkowe zmiennych ilościowych
+
+```{r echo=FALSE}
+par(
+  mfrow = c(2, 2),
+  mar = c(1, 5, 2, 1),
+  oma = c(0, 0, 0, 0))
+
+boxplot(dane$czas_trwania, main = "Czas trwania", col = "chocolate", ylab = "Czas trwania [w miesiącach]")
+boxplot(dane$kwota_kredytu, main = "Kwota kredytu", col = "chocolate", ylab = "Kwota kredytu [w DM]")
+boxplot(dane$wiek, main = "Wiek", col = "chocolate", ylab = "Wiek [w latach]")
+boxplot(dane$liczba_kredytow, main = "Liczba kredytów", col = "chocolate", ylab = "Liczba kredytów")
+```
+
+## Wykresy rozkładów warunkowych zmiennych ilościowych
+
+```{r echo=FALSE}
+par(
+  mfrow = c(2, 2),
+  mar = c(4, 5, 3, 2)
+)
+
+cdplot(dane$czas_trwania, dane$klasa, xlab = "Czas trwania [w miesiącach]", ylab = "Klasa kredytobiorcy", 
+       col = c("tan1", "lightgray"), main = "Czas trwania vs Klasa kredytobiorcy")
+cdplot(dane$kwota_kredytu, dane$klasa, xlab = "Kwota kredytu [w DM]", ylab = "Klasa kredytobiorcy", 
+       col = c("tan1", "lightgray"), , main = "Kwota kredytu vs Klasa kredytobiorcy")
+cdplot(dane$wiek, dane$klasa, xlab = "Wiek", ylab = "Klasa kredytobiorcy", 
+       col = c("tan1", "lightgray"), , main = "Wiek vs Klasa kredytobiorcy")
+cdplot(dane$liczba_kredytow, dane$klasa, xlab = "Liczba kredytów", ylab = "Klasa kredytobiorcy", 
+       col = c("tan1", "lightgray"), , main = "Liczba kredytów vs Klasa kredytobiorcy")
+```
+
+## Histogramy zmiennych ilościowych
+
+```{r echo=FALSE}
+par(
+  mfrow = c(1, 3),
+  mar = c(4, 4, 2, 0))
+
+hist(dane$czas_trwania, main = "Czas trwania", col = "orangered", ylab = "Częstość", xlab = "Czas trwania w miesiącach")
+hist(dane$kwota_kredytu, main = "Kwota kredytu", col = "orangered", ylab = "Częstość", xlab = "Kwota kredytu w DM")
+hist(dane$wiek, main = "Wiek", col = "orangered", ylab = "Częstość", xlab = "Wiek w latach")
+```
+
+## Wykresy pudełkowe zmiennych ilościowych względem rodzaju kredytobiorcy
+
+```{r echo=FALSE}
+par(
+  mfrow = c(2, 2),
+  mar = c(4, 5, 3, 3))
+
+boxplot(dane$czas_trwania ~ dane$klasa, main = "Czas trwania vs Klasa kredytobiorcy", 
+        col = c("orange", "chocolate"), ylab = "Czas trwania \n [w miesiącach]", xlab = "Klasa kredytobiorcy")
+boxplot(dane$kwota_kredytu ~ dane$klasa, main = "Kwota kredytu vs Klasa kredytobiorcy", 
+        col = c("orange", "chocolate"), ylab = "Kwota kredytu \n [w DM]", xlab = "Klasa kredytobiorcy")
+boxplot(dane$wiek ~ dane$klasa, main = "Wiek vs Klasa kredytobiorcy", 
+        col = c("orange", "chocolate"), ylab = "Wiek [w latach]", xlab = "Klasa kredytobiorcy")
+```
+
+## Wykresy słupkowe zmiennych jakościowych
+
+```{r echo=FALSE, fig.height=5.5, fig.width=8}
+par(
+  mfrow = c(2, 2),
+  mar = c(2.5, 4, 2, 1))
+
+barplot(table(dane$status_konta), col = "peachpuff", main = "Status konta", ylab = "Liczebność")
+barplot(table(dane$dluznicy), col = 'peachpuff', main = "Dłużnicy", ylab = "Liczebność")
+barplot(table(dane$inne_plany), col = 'peachpuff', main = "Inne plany", ylab = "Liczebność")
+barplot(table(dane$mieszkanie), col = 'peachpuff', main = "Mieszkanie", ylab = "Liczebność")
+barplot(table(dane$pracownik_zagraniczny), col = 'peachpuff', main = "Pracownik zagraniczny", ylab = "Liczebność")
+barplot(table(dane$telefon), col = 'peachpuff', main = "Telefon", ylab = "Liczebność")
+barplot(table(dane$plec), col = 'peachpuff', main = "Płeć", ylab = "Liczebność")
+barplot(table(dane$liczba_kredytow), col = 'peachpuff', main = "Liczba kredytów", ylab = "Liczebność")
+
+par(
+  mfrow = c(2, 1),
+  mar = c(2.5, 4, 2, 0))
+
+barplot(table(dane$oszczednosci), col = 'peachpuff', main = "Oszczędności", ylab = "Liczebność")
+barplot(table(dane$zawod), col = 'peachpuff', main = "Zawód", ylab = "Liczebność")
+
+par( mfrow = c(1, 1),
+     mar = c(7, 4, 2, 2))
+
+bp <- barplot(table(dane$cel),
+              col = "peachpuff",
+              main = "Cel",
+              xaxt = "n", ylab = "Liczebność")
+text(x = bp, y = -0.05 * max(table(dane$cel)), 
+     labels = names(table(dane$cel)),
+     srt = 45, adj = 1, xpd = TRUE, cex = 0.8)
+
+bp <- barplot(table(dane$historia_kredytowa),
+              col = "peachpuff",
+              main = "Historia kredytowa",
+              xaxt = "n", ylab = "Liczebność")
+text(x = bp, y = -0.05 * max(table(dane$historia_kredytowa)), 
+     labels = names(table(dane$historia_kredytowa)),
+     srt = 45, adj = 1, xpd = TRUE, cex = 0.8)
+
+bp <- barplot(table(dane$majątek),
+              col = "peachpuff",
+              main = "Majątek",
+              xaxt = "n", ylab = "Liczebność")
+text(x = bp, y = -0.05 * max(table(dane$majątek)), 
+     labels = names(table(dane$majątek)),
+     srt = 45, adj = 1, xpd = TRUE, cex = 0.8)
+```
+
+
+## Sprawdzenie korelacji parami zmiennych objaśniających
+### Współczynnik korelacji Pearsona
+
+```{r echo=FALSE}
+round(cor(dane[ , c("czas_trwania", "kwota_kredytu", "wiek", "liczba_kredytow")]), 3)
+```
+
+### Współczynnik korelacji punktowo-dwuseryjnej
+
+```{r echo=FALSE}
+round(cor(dane[ , c("czas_trwania", "kwota_kredytu", "wiek", "liczba_kredytow")], 
+          dane[ , c("plec", "telefon", "pracownik_zagraniczny")]), 3)
+```
+
+### Współczynnik kontyngencji V-Cramera
+
+```{r echo=FALSE}
+dane.bez <- dane %>% select(-"czas_trwania", -"kwota_kredytu", -"wiek", -"liczba_kredytow")
+
+cramer_all <- function(dane.bez) {
+  
+  dane.bez[] <- lapply(dane.bez, as.factor)
+  
+  n <- ncol(dane.bez)
+  
+  wynik <- matrix(NA, n, n)
+  colnames(wynik) <- names(dane.bez)
+  rownames(wynik) <- names(dane.bez)
+  
+  for (i in 1:n) {
+    for (j in 1:n) {
+      tab <- table(dane.bez[[i]], dane.bez[[j]])
+      
+      if (all(dim(tab) > 1)) {
+        wynik[i, j] <- assocstats(tab)$cramer
+      }
+    }
+  }
+  
+  return(wynik)
+}
+
+macierz <- cramer_all(dane.bez)
+macierz
+```
+
+
+# Estymacja modeli dwumianowych logitowych
+## Podział zbioru na zbiory uczący i testowy
+
+```{r}
+set.seed(2137)
+n <- nrow(dane)
+liczby_losowe <- sample(c(1:n), round(0.7 * n), replace = FALSE)
+dane_uczacy <- dane[liczby_losowe, ]
+dane_testowy <- dane[-liczby_losowe, ]
+```
+
+```{r echo=FALSE}
+cat("Liczba obserwacji w całym zbiorze danych")
+table(dane$klasa)
+cat("\nLiczba obserwacji w zbiorze uczącym")
+table(dane_uczacy$klasa)
+cat("\nLiczba obserwacji w zbiorze testowym")
+table(dane_testowy$klasa)
+
+cat("\nProporcja obserwacji w całym zbiorze danych")
+table(dane$klasa) / nrow(dane)
+cat("\nProporcja obserwacji w zbiorze uczącym")
+table(dane_uczacy$klasa) / nrow(dane_uczacy)
+cat("\nProporcja obserwacji w zbiorze testowym")
+table(dane_testowy$klasa) / nrow(dane_testowy)
+```
+
+## Estymacja modelu dwumianowego logitowego logit0
+
+```{r}
+logit0 <- glm(klasa ~ ., data = dane_uczacy, family = binomial)
+summary(logit0)
+```
+
+
+```{r}
+dane_uczacy$historia_kredytowa <- relevel(dane_uczacy$historia_kredytowa, ref = "wszystkie spłacone (bank)")
+dane_uczacy$cel <- relevel(dane_uczacy$cel, ref = "edukacja")
+dane_uczacy$dluznicy <- relevel(dane_uczacy$dluznicy, ref = "współkredytobiorca")
+dane_uczacy$majątek <- relevel(dane_uczacy$majątek, ref = "brak")
+dane_uczacy$mieszkanie <- relevel(dane_uczacy$mieszkanie, ref = "wynajem")
+dane_uczacy$zawod <- relevel(dane_uczacy$zawod, ref = "kadra/manager")
+dane_uczacy$pracownik_zagraniczny <- factor(dane_uczacy$pracownik_zagraniczny, levels = c(1, 0))
+```
+
+
+```{r}
+dane_testowy$historia_kredytowa <- relevel(dane_testowy$historia_kredytowa, ref = "wszystkie spłacone (bank)")
+dane_testowy$cel <- relevel(dane_testowy$cel, ref = "edukacja")
+dane_testowy$dluznicy <- relevel(dane_testowy$dluznicy, ref = "współkredytobiorca")
+dane_testowy$majątek <- relevel(dane_testowy$majątek, ref = "brak")
+dane_testowy$mieszkanie <- relevel(dane_testowy$mieszkanie, ref = "wynajem")
+dane_testowy$zawod <- relevel(dane_testowy$zawod, ref = "kadra/manager")
+dane_testowy$pracownik_zagraniczny <- factor(dane_testowy$pracownik_zagraniczny, levels = c(1, 0))
+```
+
+
+```{r}
+dane_uczacy$plec <- factor(dane_uczacy$plec)
+dane_testowy$plec <- factor(dane_testowy$plec)
+```
+
+
+```{r}
+logit0 <- glm(klasa ~ ., data = dane_uczacy, family = binomial)
+summary(logit0)
+```
+
+
+```{r echo=FALSE}
+lrtest(logit0)
+waldtest(logit0)
+```
+
+
+```{r echo=FALSE}
+vif(logit0)
+```
+
+
+## Estymacja modelu dwumianowego logitowego metodą krokową testu ilorazu wiarygodności
+
+```{r}
+drop1(logit0, test = "Chisq")
+```
+
+```{r}
+logit0.1 <- glm(klasa ~ ., data = dane_uczacy %>% select(-"majątek"), family = binomial)
+drop1(logit0.1, test = "Chisq")
+```
+
+```{r include=FALSE}
+logit0.2 <- glm(klasa ~ ., data = dane_uczacy %>% select(-"majątek", -"inne_plany"), family = binomial)
+drop1(logit0.2, test = "Chisq")
+```
+
+```{r include=FALSE}
+logit0.3 <- glm(klasa ~ ., data = dane_uczacy %>% select(-"majątek", -"inne_plany", -"mieszkanie"), family = binomial)
+drop1(logit0.3, test = "Chisq")
+```
+
+```{r include=FALSE}
+logit0.4 <- glm(klasa ~ ., data = dane_uczacy %>% select(-"majątek", -"inne_plany", -"mieszkanie", -"zawod"), family = binomial)
+drop1(logit0.4, test = "Chisq")
+```
+
+```{r include=FALSE}
+logit0.5 <- glm(klasa ~ ., data = dane_uczacy %>% select(-"majątek", -"inne_plany", -"mieszkanie", -"zawod", -"telefon"), family = binomial)
+drop1(logit0.5, test = "Chisq")
+```
+
+```{r include=FALSE}
+logit0.6 <- glm(klasa ~ ., data = dane_uczacy %>% select(-"majątek", -"inne_plany", -"mieszkanie", -"zawod", -"telefon", -"kwota_kredytu"), family = binomial)
+drop1(logit0.6, test = "Chisq")
+```
+
+```{r include=FALSE}
+logit0.7 <- glm(klasa ~ ., data = dane_uczacy %>% select(-"majątek", -"inne_plany", -"mieszkanie", -"zawod", -"telefon", -"kwota_kredytu", -"wiek"), family = binomial)
+drop1(logit0.7, test = "Chisq")
+```
+
+```{r include=FALSE}
+logit0.8 <- glm(klasa ~ ., data = dane_uczacy %>% select(-"majątek", -"inne_plany", -"mieszkanie", -"zawod", -"telefon", -"kwota_kredytu", -"wiek", -"liczba_kredytow"), family = binomial)
+drop1(logit0.8, test = "Chisq")
+```
+
+```{r include=FALSE}
+logit0.9 <- glm(klasa ~ ., data = dane_uczacy %>% select(-"majątek", -"inne_plany", -"mieszkanie", -"zawod", -"telefon", -"kwota_kredytu", -"wiek", -"liczba_kredytow", -"dluznicy"), family = binomial)
+drop1(logit0.9, test = "Chisq")
+```
+
+```{r include=FALSE}
+logit0.10 <- glm(klasa ~ ., data = dane_uczacy %>% select(-"majątek", -"inne_plany", -"mieszkanie", -"zawod", -"telefon", -"kwota_kredytu", -"wiek", -"liczba_kredytow", -"dluznicy", -"pracownik_zagraniczny"), family = binomial)
+drop1(logit0.10, test = "Chisq")
+```
+
+Otrzymaliśmy już wszystkie zmienne istotne, dlatego nie usuwamy kolejnych zmiennych i jest to nasz ostateczny model otrzymany tą metodą eliminacji.
+```{r}
+logit.chisq <- logit0.10
+summary(logit.chisq)
+```
+
+
+```{r echo=FALSE}
+lrtest(logit.chisq)
+waldtest(logit.chisq)
+```
+
+
+```{r echo=FALSE}
+vif(logit.chisq)
+```
+
+## Estymacja modelu dwumianowego logitowego metodą krokową AIC
+
+```{r, echo=TRUE, results='hide'}
+logit.aic <- step(logit0)
+```
+
+```{r}
+summary(logit.aic)
+```
+
+
+```{r echo=FALSE}
+lrtest(logit.aic)
+waldtest(logit.aic)
+```
+
+
+```{r echo=FALSE}
+vif(logit.aic)
+```
+
+## Estymacja modelu dwumianowego logitowego metodą krokową BIC
+
+```{r, echo=TRUE, results='hide'}
+logit.bic <- step(logit0, k = log(nrow(dane_uczacy)))
+```
+
+```{r}
+summary(logit.bic)
+```
+
+```{r echo=FALSE}
+lrtest(logit.bic)
+waldtest(logit.bic)
+```
+
+```{r echo=FALSE}
+vif(logit.bic)
+```
+
+## Estymacja modelu dwumianowego logitowego metodą krokową HQIC
+
+```{r, echo=TRUE, results='hide'}
+logit.hqic <- step(logit0, k = 2 * log(log(nrow(dane_uczacy))))
+```
+
+```{r}
+summary(logit.hqic)
+```
+
+# Ocena modeli dwumianowych logitowych
+## Porównanie modeli z modelem logit0 za pomocą testu ilorazu wiarygodności
+
+
+```{r}
+lrtest(logit0, logit.chisq)
+```
+
+```{r echo=FALSE}
+lrtest(logit0, logit.aic)
+```
+
+```{r echo=FALSE}
+lrtest(logit0, logit.bic)
+```
+
+## Porównanie dobroci dopasowania modeli logitowych
+
+```{r}
+par(mfrow = c(1,2))
+plot(logit.chisq, which = c(1, 5))
+plot(logit.aic, which = c(1, 5))
+plot(logit.bic, which = c(1, 5))
+```
+
+
+```{r}
+outlierTest(logit.chisq, n.max = Inf)
+outlierTest(logit.aic, n.max = Inf)
+outlierTest(logit.bic, n.max = Inf)
+```
+
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+ocena_modelu_dwum <- function(model) {
+  kryterium_AIC <- AIC(model)
+  kryterium_BIC <- BIC(model)
+  kryterium_AICC <- AICc(model)
+  kryterium_HQIC <- HQIC(model)
+  McFadden<- pR2(model)["McFadden"]
+  Cragg_Uhler<- pR2(model)["r2CU"]
+  ocena <- data.frame(kryterium_AIC, kryterium_BIC, kryterium_AICC, kryterium_HQIC, McFadden, Cragg_Uhler)
+  return(ocena)
+}
+
+rbind(
+  Model_logit.chisq = ocena_modelu_dwum(logit.chisq),
+  Model_logit.aic = ocena_modelu_dwum(logit.aic),
+  Model_logit.bic = ocena_modelu_dwum(logit.bic))
+```
+
+## Porównanie jakości predykcji modeli logitowych
+### Miary jakości predykcji oparte na tablicy trafności
+
+```{r echo=FALSE}
+p <- table(dane_uczacy$klasa)[2] / nrow(dane_uczacy)
+
+cat("Tablica trafności dla modelu logit0 - próba testowa\n")
+tab_traf <- data.frame(obserwowane = dane_testowy$klasa, przewidywane = ifelse(predict(logit.chisq, dane_testowy, type = "response") > p, 1, 0))
+table(tab_traf)
+
+cat("Tablica trafności dla modelu logit.aic - próba testowa\n")
+tab_traf <- data.frame(obserwowane = dane_testowy$klasa, przewidywane = ifelse(predict(logit.aic, dane_testowy, type = "response") > p, 1, 0))
+table(tab_traf)
+
+cat("Tablica trafności dla modelu logit.bic - próba testowa\n")
+tab_traf <- data.frame(obserwowane = dane_testowy$klasa, przewidywane = ifelse(predict(logit.bic, dane_testowy, type = "response") > p, 1, 0))
+table(tab_traf)
+```
+
+### Wyniki dla danych testowych
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+miary_pred <- function(model, dane, Y, p = 0.5) {
+  tab <- table(obserwowane = Y, przewidywane = ifelse(predict(model, dane, type = "response") > p, 1, 0))
+  ACC <- (tab[1, 1] + tab[2, 2]) / sum(tab)
+  ER <- (tab[1, 2] + tab[2, 1]) / sum(tab)
+  SENS <- tab[2, 2] / (tab[2, 1] + tab[2, 2])
+  SPEC <- tab[1, 1] / (tab[1, 1] + tab[1, 2])
+  PPV <- tab[2, 2] / (tab[1, 2] + tab[2, 2])
+  NPV <- tab[1, 1] / (tab[1, 1] + tab[2, 1])
+
+  miary <- data.frame(ACC, ER, SENS, SPEC, PPV, NPV)
+  return(miary)
+}
+
+rbind(
+  Model_logit.chisq = miary_pred(model = logit.chisq, dane = dane_testowy,  Y = dane_testowy$klasa, p), 
+  Model_logit.aic = miary_pred(model = logit.aic, dane = dane_testowy, Y = dane_testowy$klasa, p),
+  Model_logit.bic = miary_pred(model = logit.bic, dane = dane_testowy, Y = dane_testowy$klasa, p))
+```
+
+### Wyniki dla danych uczących
+```{r echo=FALSE}
+rbind(
+  Model_logit.chisq = miary_pred(model = logit.chisq, dane = dane_uczacy,  Y = dane_uczacy$klasa, p), 
+  Model_logit.aic = miary_pred(model = logit.aic, dane = dane_uczacy, Y = dane_uczacy$klasa, p),
+  Model_logit.bic = miary_pred(model = logit.bic, dane = dane_uczacy, Y = dane_uczacy$klasa, p))
+```
+
+
+### Porównanie wyników dla danych uczących i testowych (uczący - testowy)
+```{r echo=FALSE}
+wyniki_miary_pred <- rbind(
+  Model_logit.chisq = miary_pred(model = logit.chisq, dane = dane_uczacy,  Y = dane_uczacy$klasa, p), 
+  Model_logit.aic = miary_pred(model = logit.aic, dane = dane_uczacy, Y = dane_uczacy$klasa, p),
+  Model_logit.bic = miary_pred(model = logit.bic, dane = dane_uczacy, Y = dane_uczacy$klasa, p),
+  Model_logit.chisq = miary_pred(model = logit.chisq, dane = dane_testowy,  Y = dane_testowy$klasa, p), 
+  Model_logit.aic = miary_pred(model = logit.aic, dane = dane_testowy, Y = dane_testowy$klasa, p),
+  Model_logit.bic = miary_pred(model = logit.bic, dane = dane_testowy, Y = dane_testowy$klasa, p))
+
+rbind(
+wyniki_miary_pred[1, ] - wyniki_miary_pred[4, ], # uczący - testowy
+wyniki_miary_pred[2, ] - wyniki_miary_pred[5, ],
+wyniki_miary_pred[3, ] - wyniki_miary_pred[6, ])
+```
+
+### Miary jakości predykcji oparte na krzywej ROC
+### Krzywa ROC
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+rocobj1 <- roc(logit.chisq$y, logit.chisq$fitted.values)
+rocobj1_t <- roc(dane_testowy$klasa, predict(logit.chisq, dane_testowy, type = "response"))
+plot(rocobj1, main = "Krzywe ROC dla modelu logit.chisq", col = "red")
+lines(rocobj1_t, col = "blue")
+legend("bottomright",
+       legend = c("ROC wyznaczona na zbiorze uczącym", "ROC wyznaczona na zbiorze testowym"),
+       col = c("red", "blue"),
+       lwd = 2)
+
+rocobj2 <- roc(logit.aic$y, logit.aic$fitted.values)
+rocobj2_t <- roc(dane_testowy$klasa, predict(logit.aic, dane_testowy, type = "response"))
+plot(rocobj2, main = "Krzywe ROC dla modelu logit.aic", col = "red")
+lines(rocobj2_t, col = "blue")
+legend("bottomright",
+       legend = c("ROC wyznaczona na zbiorze uczącym", "ROC wyznaczona na zbiorze testowym"),
+       col = c("red", "blue"),
+       lwd = 2)
+
+rocobj3 <- roc(logit.bic$y, logit.bic$fitted.values)
+rocobj3_t <- roc(dane_testowy$klasa, predict(logit.bic, dane_testowy, type = "response"))
+plot(rocobj3, main = "Krzywe ROC dla modelu logit.bic", col = "red")
+lines(rocobj3_t, col = "blue")
+legend("bottomright",
+       legend = c("ROC wyznaczona na zbiorze uczącym", "ROC wyznaczona na zbiorze testowym"),
+       col = c("red", "blue"),
+       lwd = 2)
+```
+
+### Pole powierzchni pod krzywą ROC
+```{r echo=FALSE, message=FALSE}
+cat("AUC dla zbioru uczącego\n")
+auc(rocobj1)
+auc(rocobj2)
+auc(rocobj3)
+cat("\nAUC dla zbioru testowego\n")
+auc(rocobj1_t)
+auc(rocobj2_t)
+auc(rocobj3_t)
+```
+
+
+### Wskaźnik Gini'ego
+```{r echo=FALSE, message=FALSE}
+cat("Wskaźnik Gini'ego dla zbioru uczącego\n")
+2 * auc(rocobj1) - 1
+2 * auc(rocobj2) - 1
+2 * auc(rocobj3) - 1
+cat("\nWskaźnik Gini'ego dla zbioru testowego\n")
+2 * auc(rocobj1_t) - 1
+2 * auc(rocobj2_t) - 1
+2 * auc(rocobj3_t) - 1
+```
+
+# Interpretacja najlepszego modelu - model logit.aic
+
+```{r}
+summary(logit.aic)
+```
+
+```{r echo=FALSE}
+cat("\nIlorazy szans dla x + 1 (oprócz wyrazu wolnego, bo to szansa)\n")
+round(exp(logit.aic$coefficients), 5)
+```
+
+# Estymacja modeli logitowych z interakcjami
+## Estymacja modelu dwumianego logitowego logit0 z interakcjami 
+
+```{r}
+logit0.int <- glm(klasa ~ status_konta + czas_trwania + historia_kredytowa + cel + kwota_kredytu + oszczednosci
+    + zatrudnienie + plec + dluznicy + majątek + wiek + inne_plany + mieszkanie + liczba_kredytow + zawod
+    + telefon + pracownik_zagraniczny
+    + telefon:pracownik_zagraniczny + oszczednosci:telefon + plec:pracownik_zagraniczny
+    + kwota_kredytu:oszczednosci + status_konta:telefon,
+  data = dane_uczacy, family = binomial)
+summary(logit0.int)
+```
+
+```{r message=FALSE}
+vif(logit0.int)
+```
+
+```{r}
+lrtest(logit0.int)
+waldtest(logit0.int)
+```
+
+## Estymacja modelu dwumianowego logitowego metodą krokową testu ilorazu wiarygodności z interakcjami
+
+Metoda krokowa testu ilorazu wiarygodności na podstawie p-value:
+```{r}
+drop1(logit0.int, test = "Chisq")
+```
+
+```{r}
+logit0.1.int <- glm(klasa ~ status_konta + czas_trwania + historia_kredytowa + cel + kwota_kredytu + oszczednosci
+    + zatrudnienie + plec + dluznicy + majątek + wiek + inne_plany + mieszkanie + liczba_kredytow + zawod
+    + telefon + pracownik_zagraniczny
+    + telefon:pracownik_zagraniczny + oszczednosci:telefon + plec:pracownik_zagraniczny
+    + status_konta:telefon,
+  data = dane_uczacy, family = binomial)
+drop1(logit0.1.int, test = "Chisq")
+```
+
+```{r include=FALSE}
+#Usuwamy interakcję `status_konta:telefon`.
+logit0.2.int <- glm(klasa ~ status_konta + czas_trwania + historia_kredytowa + cel + kwota_kredytu + oszczednosci
+    + zatrudnienie + plec + dluznicy + majątek + wiek + inne_plany + mieszkanie + liczba_kredytow + zawod
+    + telefon + pracownik_zagraniczny
+    + telefon:pracownik_zagraniczny + oszczednosci:telefon + plec:pracownik_zagraniczny,
+  data = dane_uczacy, family = binomial)
+drop1(logit0.2.int, test = "Chisq")
+```
+
+```{r include=FALSE}
+#Usuwamy interakcję `oszczednosci:telefon`.
+logit0.3.int <- glm(klasa ~ status_konta + czas_trwania + historia_kredytowa + cel + kwota_kredytu + oszczednosci
+    + zatrudnienie + plec + dluznicy + majątek + wiek + inne_plany + mieszkanie + liczba_kredytow + zawod
+    + telefon + pracownik_zagraniczny
+    + telefon:pracownik_zagraniczny + plec:pracownik_zagraniczny,
+  data = dane_uczacy, family = binomial)
+drop1(logit0.3.int, test = "Chisq")
+```
+
+```{r include=FALSE}
+#Usuwamy zmienną `kwota_kredytu`.
+logit0.4.int <- glm(klasa ~ status_konta + czas_trwania + historia_kredytowa + cel + oszczednosci
+    + zatrudnienie + plec + dluznicy + majątek + wiek + inne_plany + mieszkanie + liczba_kredytow + zawod
+    + telefon + pracownik_zagraniczny
+    + telefon:pracownik_zagraniczny + plec:pracownik_zagraniczny,
+  data = dane_uczacy, family = binomial)
+drop1(logit0.4.int, test = "Chisq")
+```
+
+```{r include=FALSE}
+#Usuwamy zmienną `majątek`.
+logit0.5.int <- glm(klasa ~ status_konta + czas_trwania + historia_kredytowa + cel + oszczednosci
+    + zatrudnienie + plec + dluznicy + wiek + inne_plany + mieszkanie + liczba_kredytow + zawod
+    + telefon + pracownik_zagraniczny
+    + telefon:pracownik_zagraniczny + plec:pracownik_zagraniczny,
+  data = dane_uczacy, family = binomial)
+drop1(logit0.5.int, test = "Chisq")
+```
+
+```{r include=FALSE}
+#Usuwamy zmienna `inne_plany`.
+logit0.6.int <- glm(klasa ~ status_konta + czas_trwania + historia_kredytowa + cel + oszczednosci
+    + zatrudnienie + plec + dluznicy + wiek + mieszkanie + liczba_kredytow + zawod
+    + telefon + pracownik_zagraniczny
+    + telefon:pracownik_zagraniczny + plec:pracownik_zagraniczny,
+  data = dane_uczacy, family = binomial)
+drop1(logit0.6.int, test = "Chisq")
+```
+
+```{r include=FALSE}
+#Usuwamy zmienną `mieszkanie`.
+logit0.7.int <- glm(klasa ~ status_konta + czas_trwania + historia_kredytowa + cel + oszczednosci
+    + zatrudnienie + plec + dluznicy + wiek + liczba_kredytow + zawod
+    + telefon + pracownik_zagraniczny
+    + telefon:pracownik_zagraniczny + plec:pracownik_zagraniczny,
+  data = dane_uczacy, family = binomial)
+drop1(logit0.7.int, test = "Chisq")
+```
+
+```{r include=FALSE}
+#Usuwamy interakcję `plec:pracownik_zagraniczny`.
+logit0.8.int <- glm(klasa ~ status_konta + czas_trwania + historia_kredytowa + cel + oszczednosci
+    + zatrudnienie + plec + dluznicy + wiek + liczba_kredytow + zawod
+    + telefon + pracownik_zagraniczny
+    + telefon:pracownik_zagraniczny,
+  data = dane_uczacy, family = binomial)
+drop1(logit0.8.int, test = "Chisq")
+```
+
+```{r include=FALSE}
+#Usuwamy zmeinną `zawod`.
+logit0.9.int <- glm(klasa ~ status_konta + czas_trwania + historia_kredytowa + cel + oszczednosci
+    + zatrudnienie + plec + dluznicy + wiek + liczba_kredytow
+    + telefon + pracownik_zagraniczny
+    + telefon:pracownik_zagraniczny,
+  data = dane_uczacy, family = binomial)
+drop1(logit0.9.int, test = "Chisq")
+```
+
+```{r include=FALSE}
+#Usuwamy zmienna `wiek`.
+logit0.10.int <- glm(klasa ~ status_konta + czas_trwania + historia_kredytowa + cel + oszczednosci
+    + zatrudnienie + plec + dluznicy + liczba_kredytow
+    + telefon + pracownik_zagraniczny
+    + telefon:pracownik_zagraniczny,
+  data = dane_uczacy, family = binomial)
+drop1(logit0.10.int, test = "Chisq")
+```
+
+```{r include=FALSE}
+#Usuwamy zmienną `liczba_kredytow`.
+logit0.11.int <- glm(klasa ~ status_konta + czas_trwania + historia_kredytowa + cel + oszczednosci
+    + zatrudnienie + plec + dluznicy
+    + telefon + pracownik_zagraniczny
+    + telefon:pracownik_zagraniczny,
+  data = dane_uczacy, family = binomial)
+drop1(logit0.11.int, test = "Chisq")
+```
+
+```{r include=FALSE}
+#Usuwamy zmienna `dluznicy`.
+logit0.12.int <- glm(klasa ~ status_konta + czas_trwania + historia_kredytowa + cel + oszczednosci
+    + zatrudnienie + plec
+    + telefon + pracownik_zagraniczny
+    + telefon:pracownik_zagraniczny,
+  data = dane_uczacy, family = binomial)
+drop1(logit0.12.int, test = "Chisq")
+```
+
+```{r include=FALSE}
+#Usuwamy interakcję `telefon:pracownik_zagraniczny`.
+logit0.13.int <- glm(klasa ~ status_konta + czas_trwania + historia_kredytowa + cel + oszczednosci
+    + zatrudnienie + plec
+    + telefon + pracownik_zagraniczny,
+  data = dane_uczacy, family = binomial)
+drop1(logit0.13.int, test = "Chisq")
+```
+
+```{r include=FALSE}
+#Usuwamy zmienną `telefon`.
+logit0.14.int <- glm(klasa ~ status_konta + czas_trwania + historia_kredytowa + cel + oszczednosci
+    + zatrudnienie + plec + pracownik_zagraniczny,
+  data = dane_uczacy, family = binomial)
+drop1(logit0.14.int, test = "Chisq")
+```
+
+```{r}
+#Usuwamy zmienną `pracownik_zagraniczny`.
+logit0.15.int <- glm(klasa ~ status_konta + czas_trwania + historia_kredytowa + cel + oszczednosci
+    + zatrudnienie + plec,
+  data = dane_uczacy, family = binomial)
+drop1(logit0.15.int, test = "Chisq")
+```
+
+## Estymacja modelu dwumianowego logitowego metodą krokową AIC z interakcjami
+
+```{r, echo=TRUE, results='hide'}
+logit.aic.int <- step(logit0.int)
+```
+
+```{r}
+summary(logit.aic.int)
+```
+
+## Estymacja modelu dwumianowego logitowego metodą krokową BIC z interakcjami
+
+```{r, echo=TRUE, results='hide'}
+logit.bic.int <- step(logit0.int, k = log(nrow(dane_uczacy)))
+```
+
+```{r}
+summary(logit.bic.int)
+```
+
+## Estymacja modelu dwumianowego logitowego metodą krokową HQIC z interakcjami
+
+```{r, echo=TRUE, results='hide'}
+logit.hqic.int <- step(logit0.int, k = 2 * log(log(nrow(dane_uczacy))))
+```
+
+```{r}
+summary(logit.hqic.int)
+```
+
+# Ocena modeli dwumianowych logitowych z interakcjami
+## Porównanie modeli z modelem logit0.int za pomocą testu ilorazu wiarygodności
+
+```{r echo=FALSE}
+lrtest(logit0.int, logit.aic.int)
+```
+
+```{r echo=FALSE}
+lrtest(logit0.int, logit.hqic.int)
+```
+
+## Porównanie dobroci dopasowania modeli logitowych z interakcjami
+
+```{r}
+par(mfrow = c(1,2))
+plot(logit.aic.int, which = c(1, 5))
+plot(logit.hqic.int, which = c(1, 5))
+```
+
+```{r}
+outlierTest(logit.aic.int, n.max = Inf)
+outlierTest(logit.hqic.int, n.max = Inf)
+```
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+ocena_modelu_dwum <- function(model) {
+  kryterium_AIC <- AIC(model)
+  kryterium_BIC <- BIC(model)
+  kryterium_AICC <- AICc(model)
+  kryterium_HQIC <- HQIC(model)
+  McFadden<- pR2(model)["McFadden"]
+  Cragg_Uhler<- pR2(model)["r2CU"]
+  ocena <- data.frame(kryterium_AIC, kryterium_BIC, kryterium_AICC, kryterium_HQIC, McFadden, Cragg_Uhler)
+  return(ocena)
+}
+
+rbind(
+  Model_logit.aic.int = ocena_modelu_dwum(logit.aic.int),
+  Model_logit.hqic.int = ocena_modelu_dwum(logit.hqic.int))
+```
+
+## Porównanie jakości predykcji modeli logitowych z interakcjami
+### Miary jakości predykcji oparte na tablicy trafności
+
+```{r echo=FALSE}
+p <- table(dane_uczacy$klasa)[2] / nrow(dane_uczacy)
+
+cat("Tablica trafności dla modelu logit.aic - próba testowa\n")
+tab_traf <- data.frame(obserwowane = dane_testowy$klasa, przewidywane = ifelse(predict(logit.aic.int, dane_testowy, type = "response") > p, 1, 0))
+table(tab_traf)
+
+cat("Tablica trafności dla modelu logit.hqic - próba testowa\n")
+tab_traf <- data.frame(obserwowane = dane_testowy$klasa, przewidywane = ifelse(predict(logit.hqic.int, dane_testowy, type = "response") > p, 1, 0))
+table(tab_traf)
+```
+
+### Wyniki dla danych testowych
+```{r echo=FALSE}
+miary_pred <- function(model, dane, Y, p = 0.5) {
+  tab <- table(obserwowane = Y, przewidywane = ifelse(predict(model, dane, type = "response") > p, 1, 0))
+  ACC <- (tab[1, 1] + tab[2, 2]) / sum(tab)
+  ER <- (tab[1, 2] + tab[2, 1]) / sum(tab)
+  SENS <- tab[2, 2] / (tab[2, 1] + tab[2, 2])
+  SPEC <- tab[1, 1] / (tab[1, 1] + tab[1, 2])
+  PPV <- tab[2, 2] / (tab[1, 2] + tab[2, 2])
+  NPV <- tab[1, 1] / (tab[1, 1] + tab[2, 1])
+
+  miary <- data.frame(ACC, ER, SENS, SPEC, PPV, NPV)
+  return(miary)
+}
+
+rbind(
+  Model_logit.aic.int = miary_pred(model = logit.aic.int, dane = dane_testowy, Y = dane_testowy$klasa, p),
+  Model_logit.hqic.int = miary_pred(model = logit.hqic.int, dane = dane_testowy,  Y = dane_testowy$klasa, p))
+```
+
+### Wyniki dla danych uczących
+```{r echo=FALSE}
+rbind(
+  Model_logit.aic.int = miary_pred(model = logit.aic.int, dane = dane_uczacy, Y = dane_uczacy$klasa, p),
+  Model_logit.hqic.int = miary_pred(model = logit.hqic.int, dane = dane_uczacy,  Y = dane_uczacy$klasa, p))
+```
+
+### Porównanie wyników dla danych uczących i testowych (uczący - testowy)
+```{r echo=FALSE}
+wyniki_miary_pred <- rbind(
+  Model_logit.aic.int = miary_pred(model = logit.aic.int, dane = dane_uczacy, Y = dane_uczacy$klasa, p),
+  Model_logit.hqic.int = miary_pred(model = logit.hqic.int, dane = dane_uczacy,  Y = dane_uczacy$klasa, p), 
+  Model_logit.aic.int1 = miary_pred(model = logit.aic.int, dane = dane_testowy, Y = dane_testowy$klasa, p),
+  Model_logit.hqic.int1 = miary_pred(model = logit.hqic.int, dane = dane_testowy,  Y = dane_testowy$klasa, p))
+
+rbind(
+wyniki_miary_pred[1, ] - wyniki_miary_pred[3, ],
+wyniki_miary_pred[2, ] - wyniki_miary_pred[4, ])
+```
+
+### Miary jakości predykcji oparte na krzywej ROC
+### Krzywa ROC
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+rocobj1 <- roc(logit.aic.int$y, logit.aic.int$fitted.values)
+rocobj1_t <- roc(dane_testowy$klasa, predict(logit.aic.int, dane_testowy, type = "response"))
+plot(rocobj1, main = "Krzywe ROC dla modelu logit.aic.int", col = "red")
+lines(rocobj1_t, col = "blue")
+legend("bottomright",
+       legend = c("ROC wyznaczona na zbiorze uczącym", "ROC wyznaczona na zbiorze testowym"),
+       col = c("red", "blue"),
+       lwd = 2)
+
+rocobj2 <- roc(logit.hqic.int$y, logit.hqic.int$fitted.values)
+rocobj2_t <- roc(dane_testowy$klasa, predict(logit.hqic.int, dane_testowy, type = "response"))
+plot(rocobj2, main = "Krzywe ROC dla modelu logit.hqic.int", col = "red")
+lines(rocobj2_t, col = "blue")
+legend("bottomright",
+       legend = c("ROC wyznaczona na zbiorze uczącym", "ROC wyznaczona na zbiorze testowym"),
+       col = c("red", "blue"),
+       lwd = 2)
+```
+
+### Pole powierzchni pod krzywą ROC
+```{r echo=FALSE, message=FALSE}
+cat("AUC dla zbioru uczącego\n")
+auc(rocobj1)
+auc(rocobj2)
+cat("\nAUC dla zbioru testowego\n")
+auc(rocobj1_t)
+auc(rocobj2_t)
+```
+
+### Wskaźnik Gini'ego
+```{r echo=FALSE, message=FALSE}
+cat("Wskaźnik Gini'ego dla zbioru uczącego\n")
+2 * auc(rocobj1) - 1
+2 * auc(rocobj2) - 1
+cat("\nWskaźnik Gini'ego dla zbioru testowego\n")
+2 * auc(rocobj1_t) - 1
+2 * auc(rocobj2_t) - 1
+```
+
+# Interpretacja najlepszego modelu dwumianowego logitowego z interakcjami - logit.aic.int
+
+```{r}
+summary(logit.aic.int)
+```
+
+```{r echo=FALSE}
+cat("\nIlorazy szans dla x + 1 (oprócz wyrazu wolnego, bo to szansa)\n")
+round(exp(logit.aic.int$coefficients), 5)
+```
+
+
+# Porównanie najlepszego modelu bez interakcji z najlepszym modelem z interakcjami
+## Porównanie jakości dopasowania modeli logitowych
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+ocena_modelu_dwum <- function(model) {
+  kryterium_AIC <- AIC(model)
+  kryterium_BIC <- BIC(model)
+  kryterium_AICC <- AICc(model)
+  kryterium_HQIC <- HQIC(model)
+  McFadden<- pR2(model)["McFadden"]
+  Cragg_Uhler<- pR2(model)["r2CU"]
+  ocena <- data.frame(kryterium_AIC, kryterium_BIC, kryterium_AICC, kryterium_HQIC, McFadden, Cragg_Uhler)
+  return(ocena)
+}
+
+rbind(
+  Model_logit.aic = ocena_modelu_dwum(logit.aic),
+  Model_logit.aic.int = ocena_modelu_dwum(logit.aic.int))
+```
+
+## Porównanie jakości predykcji modeli logitowych
+### Miary jakości predykcji oparte na tablicy trafności
+
+```{r echo=FALSE}
+p <- table(dane_uczacy$klasa)[2] / nrow(dane_uczacy)
+
+cat("Tablica trafności dla modelu aic - próba testowa\n")
+tab_traf <- data.frame(obserwowane = dane_testowy$klasa, przewidywane = ifelse(predict(logit.aic, dane_testowy, type = "response") > p, 1, 0))
+table(tab_traf)
+
+cat("Tablica trafności dla modelu logit.aic.int - próba testowa\n")
+tab_traf <- data.frame(obserwowane = dane_testowy$klasa, przewidywane = ifelse(predict(logit.aic.int, dane_testowy, type = "response") > p, 1, 0))
+table(tab_traf)
+```
+
+### Wyniki dla danych testowych
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+miary_pred <- function(model, dane, Y, p = 0.5) {
+  tab <- table(obserwowane = Y, przewidywane = ifelse(predict(model, dane, type = "response") > p, 1, 0))
+  ACC <- (tab[1, 1] + tab[2, 2]) / sum(tab)
+  ER <- (tab[1, 2] + tab[2, 1]) / sum(tab)
+  SENS <- tab[2, 2] / (tab[2, 1] + tab[2, 2])
+  SPEC <- tab[1, 1] / (tab[1, 1] + tab[1, 2])
+  PPV <- tab[2, 2] / (tab[1, 2] + tab[2, 2])
+  NPV <- tab[1, 1] / (tab[1, 1] + tab[2, 1])
+
+  miary <- data.frame(ACC, ER, SENS, SPEC, PPV, NPV)
+  return(miary)
+}
+
+rbind(
+  Model_logit.aic = miary_pred(model = logit.aic, dane = dane_testowy,  Y = dane_testowy$klasa, p), 
+  Model_logit.aic.int = miary_pred(model = logit.aic.int, dane = dane_testowy, Y = dane_testowy$klasa, p))
+```
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+rocobj1 <- roc(logit.aic$y, logit.aic$fitted.values)
+rocobj1_t <- roc(dane_testowy$klasa, predict(logit.aic, dane_testowy, type = "response"))
+plot(rocobj1, main = "Krzywe ROC dla modelu logit.aic", col = "red")
+lines(rocobj1_t, col = "blue")
+legend("bottomright",
+       legend = c("ROC wyznaczona na zbiorze uczącym", "ROC wyznaczona na zbiorze testowym"),
+       col = c("red", "blue"),
+       lwd = 2)
+
+rocobj2 <- roc(logit.aic.int$y, logit.aic.int$fitted.values)
+rocobj2_t <- roc(dane_testowy$klasa, predict(logit.aic.int, dane_testowy, type = "response"))
+plot(rocobj2, main = "Krzywe ROC dla modelu logit.aic.int", col = "red")
+lines(rocobj2_t, col = "blue")
+legend("bottomright",
+       legend = c("ROC wyznaczona na zbiorze uczącym", "ROC wyznaczona na zbiorze testowym"),
+       col = c("red", "blue"),
+       lwd = 2)
+```
+
+### Pole powierzchni pod krzywą ROC
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+cat("AUC dla zbioru uczącego\n")
+auc(rocobj1)
+auc(rocobj2)
+cat("\nAUC dla zbioru testowego\n")
+auc(rocobj1_t)
+auc(rocobj2_t)
+```
+
+### Wskaźnik Gini'ego
+```{r echo=FALSE, message=FALSE}
+cat("Wskaźnik Gini'ego dla zbioru uczącego\n")
+2 * auc(rocobj1) - 1
+2 * auc(rocobj2) - 1
+cat("\nWskaźnik Gini'ego dla zbioru testowego\n")
+2 * auc(rocobj1_t) - 1
+2 * auc(rocobj2_t) - 1
+```

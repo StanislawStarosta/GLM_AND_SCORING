@@ -1,0 +1,374 @@
+---
+title: "Untitled"
+output: html_document
+date: "2026-04-12"
+---
+
+
+```{r}
+german <- read.table("german.data", header = FALSE, sep = "")
+
+# Podejrzenie danych
+head(german)
+
+# Sprawdzenie struktury
+str(german)
+```
+
+
+```{r}
+german <- read.table("german.data", header = FALSE, sep = "")
+
+colnames(german) <- c(
+  "status_konta", "czas_trwania", "historia_kredytowa", "cel",
+  "kwota_kredytu", "oszczednosci", "zatrudnienie",
+  "rata_proc_dochodu", "status_plec", "dluznicy",
+  "zamieszkanie_lata", "majątek", "wiek",
+  "inne_plany", "mieszkanie", "liczba_kredytow",
+  "zawod", "liczba_osob_na_utrzymaniu",
+  "telefon", "pracownik_zagraniczny", "klasa"
+)
+```
+
+
+```{r}
+german$status_konta <- factor(german$status_konta,
+levels = c("A11","A12","A13","A14"),
+labels = c("<0 DM","0-200 DM",">=200 DM","brak konta"))
+
+german$historia_kredytowa <- factor(german$historia_kredytowa,
+levels = c("A30","A31","A32","A33","A34"),
+labels = c("brak kredytów","wszystkie spłacone (bank)",
+           "spłacane terminowo","opóźnienia",
+           "konto krytyczne"))
+german$cel <- factor(german$cel,
+levels = c("A40","A41","A42","A43","A44","A45",
+           "A46","A48","A49","A410"),
+labels = c("auto nowe","auto używane","meble",
+           "RTV","AGD","naprawy",
+           "edukacja","przekwalifikowanie",
+           "biznes","inne"))
+german$oszczednosci <- factor(german$oszczednosci,
+levels = c("A61","A62","A63","A64","A65"),
+labels = c("<100","100-500","500-1000",">=1000","brak/nieznane"))
+
+german$zatrudnienie <- factor(german$zatrudnienie,
+levels = c("A71","A72","A73","A74","A75"),
+labels = c("bezrobotny","<1 rok","1-4 lata","4-7 lat",">=7 lat"))
+
+german$status_plec <- factor(german$status_plec,
+levels = c("A91","A92","A93","A94","A95"),
+labels = c("mężczyzna rozwiedziony","kobieta",
+           "mężczyzna singiel","mężczyzna żonaty",
+           "kobieta singiel"))
+
+german$dluznicy <- factor(german$dluznicy,
+levels = c("A101","A102","A103"),
+labels = c("brak","współkredytobiorca","żyrant"))
+
+german$majątek <- factor(german$majątek,
+levels = c("A121","A122","A123","A124"),
+labels = c("nieruchomość","ubezpieczenie/oszczędności",
+           "auto/inne","brak"))
+german$inne_plany <- factor(german$inne_plany,
+levels = c("A141","A142","A143"),
+labels = c("bank","sklep","brak"))
+
+german$mieszkanie <- factor(german$mieszkanie,
+levels = c("A151","A152","A153"),
+labels = c("wynajem","własność","za darmo"))
+
+german$zawod <- factor(german$zawod,
+levels = c("A171","A172","A173","A174"),
+labels = c("bezrobotny/niski","niewykwalifikowany",
+           "wykwalifikowany","kadra/manager"))
+
+german$telefon <- factor(german$telefon,
+levels = c("A191","A192"),
+labels = c("brak","jest"))
+
+german$pracownik_zagraniczny <- factor(german$pracownik_zagraniczny,
+levels = c("A201","A202"),
+labels = c("tak","nie"))
+
+german$klasa <- factor(german$klasa,
+levels = c(1,2),
+labels = c("dobry","zły"))
+```
+
+```{r}
+head(german, 30)
+```
+
+**Status konta**
+<0 - dług
+0-200 - mało środków na koncie
+'>200 ' - stabilna sytuacja
+brak konta - ktoś nie ma konta w banku
+
+**czas_trwania**
+Na jaki okres został udzielony kredyt
+
+
+```{r}
+library(dplyr)
+library(knitr)
+
+slownik <- list(
+
+  status_konta = data.frame(
+    wartosc = c("<0 DM","0-200 DM",">=200 DM","brak konta"),
+    opis = c("konto na minusie",
+             "niskie saldo",
+             "wysokie saldo / stabilne wpływy",
+             "brak konta")
+  ),
+
+  historia_kredytowa = data.frame(
+    wartosc = c("brak kredytów","wszystkie spłacone (bank)",
+                "spłacane terminowo","opóźnienia","konto krytyczne"),
+    opis = c("brak historii lub wszystko spłacone",
+             "dobra historia w tym banku",
+             "aktualne kredyty spłacane poprawnie",
+             "opóźnienia w przeszłości",
+             "poważne problemy kredytowe")
+  ),
+
+  oszczednosci = data.frame(
+    wartosc = c("<100","100-500","500-1000",">=1000","brak/nieznane"),
+    opis = c("bardzo niskie","niskie","średnie","wysokie","brak danych")
+  ),
+
+  zatrudnienie = data.frame(
+    wartosc = c("bezrobotny","<1 rok","1-4 lata","4-7 lat",">=7 lat"),
+    opis = c("brak pracy","krótkie zatrudnienie",
+             "średni staż","długi staż","bardzo długi staż")
+  ),
+
+  inne_plany = data.frame(
+    wartosc = c("bank","sklep","brak"),
+    opis = c("inne kredyty w banku",
+             "raty w sklepach",
+             "brak innych zobowiązań")
+  ),
+
+  mieszkanie = data.frame(
+    wartosc = c("wynajem","własność","za darmo"),
+    opis = c("wynajmowane mieszkanie",
+             "własne mieszkanie/dom",
+             "brak kosztów (np. u rodziny)")
+  ),
+
+  klasa = data.frame(
+    wartosc = c("dobry","zły"),
+    opis = c("klient spłaci kredyt",
+             "klient ryzykowny")
+  )
+)
+```
+
+```{r}
+pokaz_tabelke <- function(nazwa) {
+  cat("###", nazwa, "\n")
+  kable(slownik[[nazwa]])
+  cat("\n\n")
+}
+```
+
+```{r}
+for(nazwa in names(slownik)) {
+  pokaz_tabelke(nazwa)
+}
+```
+
+```{r}
+library(writexl)
+
+write_xlsx(german, "german_credit.xlsx")
+write.csv(german, "german_credit.csv", row.names = FALSE)
+```
+
+
+
+```{r}
+status_konta <- data.frame(
+  kod = c("<0 DM","0-200 DM",">=200 DM","brak konta"),
+  wartosc = c(
+    "konto na minusie",
+    "niskie saldo",
+    "wysokie saldo / stabilne wpływy",
+    "brak rachunku bankowego"
+  ),
+  opis = c(
+    "Klient ma debet – wydaje więcej niż posiada, co oznacza wysokie ryzyko finansowe.",
+    "Klient posiada niewielkie środki na koncie, co sugeruje ograniczoną płynność finansową.",
+    "Klient ma stabilną sytuację finansową lub regularne wpływy, co zmniejsza ryzyko kredytowe.",
+    "Brak historii rachunku bankowego utrudnia ocenę wiarygodności klienta."
+  )
+)
+status_konta
+```
+
+```{r}
+historia_kredytowa <- data.frame(
+  kod = c("A30","A31","A32","A33","A34"),
+  wartosc = c(
+    "brak kredytów / spłacone",
+    "spłacone kredyty w tym banku",
+    "kredyty spłacane terminowo",
+    "opóźnienia w spłatach",
+    "poważne problemy kredytowe"
+  ),
+  opis = c(
+    "Brak historii kredytowej lub pełna terminowa spłata – bardzo dobra wiarygodność.",
+    "Pozytywna historia w tym banku, co zwiększa zaufanie instytucji finansowej.",
+    "Aktualne zobowiązania są regulowane terminowo, co wskazuje na stabilność finansową.",
+    "Występowały opóźnienia w spłatach, co zwiększa ryzyko kredytowe.",
+    "Klient miał poważne problemy kredytowe, co znacząco podnosi ryzyko niespłaty."
+  )
+)
+historia_kredytowa
+```
+
+```{r}
+oszczednosci <- data.frame(
+  kod = c("A61","A62","A63","A64","A65"),
+  wartosc = c(
+    "<100",
+    "100-500",
+    "500-1000",
+    ">=1000",
+    "brak/nieznane"
+  ),
+  opis = c(
+    "Bardzo niskie oszczędności, brak zabezpieczenia finansowego.",
+    "Niewielkie oszczędności, ograniczona poduszka bezpieczeństwa.",
+    "Umiarkowane oszczędności, częściowe zabezpieczenie finansowe.",
+    "Wysokie oszczędności, silne zabezpieczenie przed ryzykiem.",
+    "Brak danych lub brak konta oszczędnościowego – niepewna sytuacja."
+  )
+)
+oszczednosci
+```
+
+```{r}
+zatrudnienie <- data.frame(
+  kod = c("A71","A72","A73","A74","A75"),
+  wartosc = c(
+    "bezrobotny",
+    "<1 rok",
+    "1-4 lata",
+    "4-7 lat",
+    ">=7 lat"
+  ),
+  opis = c(
+    "Brak zatrudnienia – bardzo wysokie ryzyko kredytowe.",
+    "Bardzo krótki staż pracy, niestabilna sytuacja zawodowa.",
+    "Średnia stabilność zatrudnienia, umiarkowane ryzyko.",
+    "Długi staż pracy, stabilne źródło dochodu.",
+    "Bardzo stabilne zatrudnienie, niskie ryzyko utraty dochodu."
+  )
+)
+zatrudnienie
+```
+
+```{r}
+cel_kredytu <- data.frame(
+  kod = c("A40","A41","A42","A43","A44","A45","A46","A48","A49","A410"),
+  wartosc = c(
+    "auto nowe",
+    "auto używane",
+    "meble",
+    "RTV",
+    "AGD",
+    "naprawy",
+    "edukacja",
+    "przekwalifikowanie",
+    "biznes",
+    "inne"
+  ),
+  opis = c(
+    "Zakup nowego samochodu – zwykle stabilny i przewidywalny cel.",
+    "Zakup używanego samochodu – umiarkowane ryzyko związane z wartością aktywa.",
+    "Zakup wyposażenia domu – konsumpcyjny cel kredytu.",
+    "Zakup elektroniki – typowy kredyt konsumpcyjny.",
+    "Zakup sprzętu gospodarstwa domowego – kredyt konsumpcyjny.",
+    "Kredyt na naprawy – często związany z nagłymi wydatkami.",
+    "Inwestycja w edukację – potencjalnie zwiększa przyszłe dochody.",
+    "Zmiana kwalifikacji – inwestycja w przyszłą zdolność zarobkową.",
+    "Działalność gospodarcza – może generować wysokie, ale ryzykowne dochody.",
+    "Inne cele – trudne do klasyfikacji, większa niepewność."
+  )
+)
+cel_kredytu
+```
+
+
+```{r}
+mieszkanie <- data.frame(
+  kod = c("A151","A152","A153"),
+  wartosc = c(
+    "wynajem",
+    "własność",
+    "za darmo"
+  ),
+  opis = c(
+    "Klient wynajmuje mieszkanie, co oznacza stałe miesięczne koszty.",
+    "Klient posiada własne mieszkanie, co zwiększa stabilność finansową.",
+    "Brak kosztów mieszkaniowych (np. mieszkanie u rodziny), ale możliwa niestabilność sytuacji."
+  )
+)
+mieszkanie
+```
+
+
+```{r}
+klasa <- data.frame(
+  kod = c("1","2"),
+  wartosc = c(
+    "dobry klient",
+    "zły klient"
+  ),
+  opis = c(
+    "Klient prawdopodobnie spłaci kredyt w terminie.",
+    "Klient ma wysokie ryzyko niespłacenia kredytu."
+  )
+)
+klasa
+```
+
+
+```{r}
+# 1. Indeks ryzyka
+risk_score <- as.numeric(german$status_konta) * 0.15 + 
+              as.numeric(german$oszczednosci) * 0.15
+
+# 2. Generowanie czasu (mieszanka rozkładów)
+n <- nrow(german)
+typ_zdarzenia <- runif(n) < 0.75 
+
+# Czas bazowy wynika już z losowości rozkładów
+base_time <- ifelse(typ_zdarzenia, 
+                    3 + rexp(n, rate = 0.7),      
+                    runif(n, 3, 12))              
+
+# 3. Finalizacja (zaokrąglenie do integer, przycięcie do 3-12)
+german$czas <- ifelse(german$klasa == "dobry", 12, 
+                      pmax(3, pmin(12, round(base_time))))
+
+# 4. Zdarzenie i eksport
+
+library(writexl)
+write_xlsx(german, "german_credit_final_czysty.xlsx")
+
+# 5. Wykres
+barplot(table(factor(german$czas[german$klasa == "zły"], levels = 3:12)), 
+        main="Rozkład zdarzeń (Mieszanka 75/25)",
+        xlab="Miesiąc", ylab="Liczba klientów", col="royalblue")
+```
+
+
+W celu symulacji dynamiki ryzyka kredytowego, dla każdego "złego" klienta wygenerowano czas wystąpienia zdarzenia (czas), korzystając z modelu mieszanego. Logika generowania danych opiera się na dwóch mechanizmach probabilistycznych:Dominanta wczesnych opóźnień (75% populacji): Wykorzystano rozkład wykładniczy (rexp). Jego właściwości sprawiają, że prawdopodobieństwo wystąpienia zdarzenia jest najwyższe tuż po rozpoczęciu kredytu (miesiące 3-5). Dzięki temu model wiernie odwzorowuje zjawisko early default, gdzie klienci o najniższej wiarygodności ujawniają problemy z płynnością najszybciej.Równomierny rozkład pozostałych przypadków (25% populacji): Użyto rozkładu jednostajnego (runif). Pozwala on na losowe rozproszenie pozostałych zdarzeń w całym dostępnym oknie czasowym (od 3. do 12. miesiąca). Dzięki temu w zbiorze danych występują również klienci, którzy przestają spłacać kredyt niespodziewanie, w późniejszych fazach obsługi długu.Uwagi techniczne dotyczące losowości:Wbudowana stochastyczność: Zastosowanie powyższych rozkładów (zamiast sztywnych formuł) gwarantuje, że każdy klient otrzymuje indywidualnie wylosowany czas, nawet jeśli posiada identyczne cechy finansowe co inny klient. Zapewnia to naturalną wariancję danych, pożądaną w analizie ryzyka.Dyskretyzacja: Wygenerowane wartości ciągłe zostały zaokrąglone do liczb całkowitych (round do integer), co w procesie zaokrąglania skutkuje zjawiskiem, w którym koszyk "3" obejmuje węższy przedział wartości niż kolejne miesiące. Jest to naturalny efekt matematyczny, a nie błąd – dane są w pełni poprawne analitycznie.Ograniczenia (Cenzurowanie): Każdy wynik został przycięty do zakresu $[3, 12]$ (pmin, pmax). Dla klientów "dobrych" czas ustawiono na 12 miesięcy, co w analizie przeżycia oznacza cenzurowanie prawostronne (brak zdarzenia w całym badanym okresie).
+
+
+

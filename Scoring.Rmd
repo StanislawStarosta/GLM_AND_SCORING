@@ -1,0 +1,3095 @@
+---
+title: "Model scoringowy dla zbioru German Credit Data"
+author: Weronika Dolatowska, Agnieszka Dzienis, Aleksandra Hukaluk, Stanisław Starosta
+output:
+  pdf_document: default
+geometry: margin = 1.5cm
+---
+
+```{r include=FALSE}
+knitr::opts_chunk$set(fig.width = 8, fig.height = 6)
+```
+
+**Zmienna objaśniana**
+
+* `klasa` - opisanie wypłacalności kredytobiorcy jako dobry lub zły
+
+**Zmienne objaśniające**
+
+* `status_konta` - stan rachunku bieżącego w Markach Niemieckich podzielony na 4 przedziały <0, (<0, 200), >200 oraz brak informacji o historii operacji na bieżącym koncie
+
+* `czas_trwania` - czas trwania kredytu w miesiącach
+
+* `historia_kredytowa` - historia kredytowa kredytobiorcy podzielona na 4 grupy: brak kredytów, konto krytyczne, opóźnienia, spłacane terminowo
+
+* `cel` - cel kredytowania podzielony na 10 kategorii (RTV, edukacja, meble, auto nowe, auot używane, biznes, AGD, naprawy, inne, przekwalifikowanie)
+
+* `kwota_kredytu` - kwota kredytu w Markach Niemieckich
+
+* `oszczednosci` - oszczędności kredytobiorcy w Markach Niemieckich podzielone na 5 przedziałów (<100, 100-500, 500-1000, >=1000, brak/nieznane)
+
+* `zatrudnienie` - czas trwania obecnego zatrudnienia podzielony na 4 przedziały czasowe (<1 rok, 1-4 lata, 4-7 lat, >=7 lat, bezrobotny)
+
+* `rata_proc_dochodu` - rata kredytu jako procent dochodu rozporządzalnego podzielona na 4 klasy
+
+* `status_plec` - płeć i status cywilny kredytobiorcy podzielony na 4 grupy: mężczyzna singiel, mężczyzna rozwiedzony, mężczyzna żonaty, kobieta rozwiedziona/zamężna
+
+* `dluznicy` - inne osoby związane z danym kredytem podzielone na 3 kategorie: brak, żyrant (poręczyciel), współkredytobiorca
+
+* `zamieszkanie_lata` - czas zamieszkania w obecnym lokum podzielony na 4 klasy
+
+* `majątek` - własność kredytobiorcy podzielona na 4 grupy: nieruchomość, w przypadku gdy nie ma nieruchomości to posiada ubezpieczenie/oszczędności, gdy nie ma obu wcześniejszych to posiada auto/inne lub brak - nie posiada żadnego majątku
+
+* `wiek` - wiek kredytobiorcy w latach
+
+* `inne_plany` - inne zadłużenia podzielone na 3 kategorie: bank - spłacanie innego kredytu w banku, sklep - spłacanie rat za zakupiony produkt, brak
+
+* `mieszkanie` - obecna sytuacja mieszkaniowa podzielona na 3 kategorie: własność - posiadanie własnego lokum, wynajem, za darmo - nie ponosi opłat mieszkaniowych
+
+* `liczba_kredytow` - liczba posiadanych kredytów w tym banku
+
+* `zawod` - status zawodowy kredytobiorcy podzielony na 4 grupy: wykwalifikowany, niewykwalifikowany - obywatel, kadra/manager - również osoby na samozatrudnieniu i oficerowie, bezrobotny/niski - niewykwalifikowany cudzoziemiec
+
+* `liczba_osob_na_utrzymaniu` - liczba osób, którym kredytobiorca musi zapewnić środki do życia podzielony na 2 grupy.
+
+* `telefon` - posiadanie numeru telefonu przez kredytobiorcę podzielony na 2 grupy: jest, brak
+
+* `pracownik_zagraniczny` - czy kredytobiorca jest cudzoziemcem podzielony na 2 grupy: tak, nie
+
+Źródło: https://github.com/JLZml/Credit-Scoring-Data-Sets/tree/master/1.%20UCI%20Repository/German
+
+
+```{r message=FALSE, warning=FALSE, include=FALSE}
+### Załadowanie pakietów
+library("lmtest") # testy LR i Walda globalne
+library("car") # funkcja vif()
+library("pscl") # pseudo-R2 funkcja pR2()
+library("pROC") # funkcje roc, auc
+library("vcd") # funkcja assocstats() - współczynniki kontyngencji
+library("ggplot2") # wykresy - funkcja ggplot()
+library("dplyr") # modyfikacje zbioru danych
+library("AICcmodavg") # funkcja aicc
+library("ICglm") # funkcja hqic
+library("readxl") # wczytywanie pliku xlsx
+library("scorecard") # scoring (iv)
+library("forcats") # dyskretyzacja
+library("purrr") # gini
+library("ResourceSelection") # test H-L
+library("tidyr") # for
+library("ROCR") # wykres lift
+library(knitr)
+library("survival") # analiza przeżycia
+library("survminer") # analiza przeżycia
+```
+
+
+## Wczytanie danych
+```{r}
+dane <- read_xlsx("german_credit_final_czysty.xlsx")
+```
+
+## Przygotowanie zmiennych
+
+Sprawdzono wstępnie statystyki opisowe zmiennych w zbiorze:
+```{r echo=FALSE}
+summary(dane)
+```
+
+Zmienne z dwoma wariantami zmieniamy na zero-jedynkowe, a dodatkowo zmienną `status_plec` przekształcaono do zmiennej `plec`, która będzie zawierać informacje na temat czy kredytobiorca jest kobietą - 0 lub mężczyzną - 1.
+```{r}
+dane$pracownik_zagraniczny <- ifelse(dane$pracownik_zagraniczny == "tak", 1, 0)
+
+dane$telefon <- ifelse(dane$telefon == "jest", 1, 0)
+
+dane$status_plec <- ifelse(dane$status_plec == "kobieta", 0, 1)
+
+dane <- dane %>% rename(plec = status_plec)
+
+dane$klasa <- ifelse(dane$klasa == "dobry", 1, 0)
+
+dane$klasa <- as.factor(dane$klasa)
+```
+
+Ponownie sprawdzono statystyki opisowe danych zaaktualizowanych:
+```{r echo=FALSE}
+summary(dane)
+```
+
+# Analiza wstępna
+
+Przed zbudowaniem modelu należy dokonać analizy rozkładów poszczególnych zmiennych, przedstawić je na wykresie, zidentyfikować obserwacje nietypowe.
+
+## Wykresy pudełkowe zmiennych ilościowych
+```{r echo=FALSE}
+par(
+  mfrow = c(2, 2),
+  mar = c(1, 5, 2, 1),
+  oma = c(0, 0, 0, 0))
+
+boxplot(dane$czas_trwania, main = "Czas trwania", col = "chocolate", ylab = "Czas trwania [w miesiącach]")
+boxplot(dane$kwota_kredytu, main = "Kwota kredytu", col = "chocolate", ylab = "Kwota kredytu [w DM]")
+boxplot(dane$wiek, main = "Wiek", col = "chocolate", ylab = "Wiek [w latach]")
+boxplot(dane$liczba_kredytow, main = "Liczba kredytów", col = "chocolate", ylab = "Liczba kredytów")
+```
+
+## Wykresy rozkładów warunkowych zmiennych ilościowych
+```{r echo=FALSE}
+par(
+  mfrow = c(2, 2),
+  mar = c(4, 5, 3, 2)
+)
+
+cdplot(dane$czas_trwania, dane$klasa, xlab = "Czas trwania [w miesiącach]", ylab = "Klasa kredytobiorcy", 
+       col = c("tan1", "lightgray"), main = "Czas trwania vs Klasa kredytobiorcy")
+cdplot(dane$kwota_kredytu, dane$klasa, xlab = "Kwota kredytu [w DM]", ylab = "Klasa kredytobiorcy", 
+       col = c("tan1", "lightgray"), , main = "Kwota kredytu vs Klasa kredytobiorcy")
+cdplot(dane$wiek, dane$klasa, xlab = "Wiek", ylab = "Klasa kredytobiorcy", 
+       col = c("tan1", "lightgray"), , main = "Wiek vs Klasa kredytobiorcy")
+cdplot(dane$liczba_kredytow, dane$klasa, xlab = "Liczba kredytów", ylab = "Klasa kredytobiorcy", 
+       col = c("tan1", "lightgray"), , main = "Liczba kredytów vs Klasa kredytobiorcy")
+```
+
+## Histogramy zmiennych ilościowych
+```{r echo=FALSE}
+par(
+  mfrow = c(1, 3),
+  mar = c(4, 4, 2, 0))
+
+hist(dane$czas_trwania, main = "Czas trwania", col = "orangered", ylab = "Częstość", xlab = "Czas trwania w miesiącach")
+hist(dane$kwota_kredytu, main = "Kwota kredytu", col = "orangered", ylab = "Częstość", xlab = "Kwota kredytu w DM")
+hist(dane$wiek, main = "Wiek", col = "orangered", ylab = "Częstość", xlab = "Wiek w latach")
+```
+
+## Wykresy pudełkowe zmiennych ilościowych względem rodzaju kredytobiorcy
+```{r echo=FALSE}
+par(
+  mfrow = c(2, 2),
+  mar = c(4, 5, 3, 3))
+
+boxplot(dane$czas_trwania ~ dane$klasa, main = "Czas trwania vs Klasa kredytobiorcy", 
+        col = c("orange", "chocolate"), ylab = "Czas trwania \n [w miesiącach]", xlab = "Klasa kredytobiorcy")
+boxplot(dane$kwota_kredytu ~ dane$klasa, main = "Kwota kredytu vs Klasa kredytobiorcy", 
+        col = c("orange", "chocolate"), ylab = "Kwota kredytu \n [w DM]", xlab = "Klasa kredytobiorcy")
+boxplot(dane$wiek ~ dane$klasa, main = "Wiek vs Klasa kredytobiorcy", 
+        col = c("orange", "chocolate"), ylab = "Wiek [w latach]", xlab = "Klasa kredytobiorcy")
+```
+
+## Wykresy słupkowe zmiennych jakościowych
+```{r echo=FALSE, fig.height=5.5, fig.width=8}
+par(
+  mfrow = c(2, 2),
+  mar = c(2.5, 4, 2, 1))
+
+barplot(table(dane$status_konta), col = "peachpuff", main = "Status konta", ylab = "Liczebność")
+barplot(table(dane$dluznicy), col = 'peachpuff', main = "Dłużnicy", ylab = "Liczebność")
+barplot(table(dane$inne_plany), col = 'peachpuff', main = "Inne plany", ylab = "Liczebność")
+barplot(table(dane$mieszkanie), col = 'peachpuff', main = "Mieszkanie", ylab = "Liczebność")
+barplot(table(dane$pracownik_zagraniczny), col = 'peachpuff', main = "Pracownik zagraniczny", ylab = "Liczebność")
+barplot(table(dane$telefon), col = 'peachpuff', main = "Telefon", ylab = "Liczebność")
+barplot(table(dane$plec), col = 'peachpuff', main = "Płeć", ylab = "Liczebność")
+barplot(table(dane$liczba_kredytow), col = 'peachpuff', main = "Liczba kredytów", ylab = "Liczebność")
+
+par(
+  mfrow = c(2, 1),
+  mar = c(2.5, 4, 2, 0))
+
+barplot(table(dane$oszczednosci), col = 'peachpuff', main = "Oszczędności", ylab = "Liczebność")
+barplot(table(dane$zawod), col = 'peachpuff', main = "Zawód", ylab = "Liczebność")
+
+par( mfrow = c(1, 1),
+     mar = c(7, 4, 2, 2))
+
+bp <- barplot(table(dane$cel),
+              col = "peachpuff",
+              main = "Cel",
+              xaxt = "n", ylab = "Liczebność")
+text(x = bp, y = -0.05 * max(table(dane$cel)), 
+     labels = names(table(dane$cel)),
+     srt = 45, adj = 1, xpd = TRUE, cex = 0.8)
+
+bp <- barplot(table(dane$historia_kredytowa),
+              col = "peachpuff",
+              main = "Historia kredytowa",
+              xaxt = "n", ylab = "Liczebność")
+text(x = bp, y = -0.05 * max(table(dane$historia_kredytowa)), 
+     labels = names(table(dane$historia_kredytowa)),
+     srt = 45, adj = 1, xpd = TRUE, cex = 0.8)
+
+bp <- barplot(table(dane$majątek),
+              col = "peachpuff",
+              main = "Majątek",
+              xaxt = "n", ylab = "Liczebność")
+text(x = bp, y = -0.05 * max(table(dane$majątek)), 
+     labels = names(table(dane$majątek)),
+     srt = 45, adj = 1, xpd = TRUE, cex = 0.8)
+```
+
+
+## Sprawdzenie korelacji parami zmiennych objaśniających
+### Współczynnik korelacji Pearsona
+```{r echo=FALSE}
+knitr::kable(round(cor(dane[ , c("czas_trwania", "kwota_kredytu", "wiek", "liczba_kredytow")]), 3))
+```
+
+Zaleca się unikania w modelu zmiennych nadmiernie skorelowanych, tzn. w przypadku współczynnika korelacji Pearsona `|r| >= 0.7`. Nigdzie nie pojawia się wartość 0.7, więc nie usunięto żadnej zmiennej.
+
+### Współczynnik korelacji punktowo-dwuseryjnej
+```{r echo=FALSE}
+knitr::kable(round(cor(dane[ , c("czas_trwania", "kwota_kredytu", "wiek", "liczba_kredytow")], 
+          dane[ , c("plec", "telefon", "pracownik_zagraniczny")]), 3))
+```
+
+Współczynnik korelacji punktowo-dwuseryjnej dla zmiennej ilościowej i dychotomicznej (zakodowanej 0-1 jako numeryczna) jest równoważny współczynnikowi korelacji Pearsona. Nigdzie nie pojawia się wartość 0.7, więc nie usunięto żadnej zmiennej.
+
+### Współczynnik kontyngencji V-Cramera
+```{r echo=FALSE}
+dane.bez <- dane %>% select(-"czas_trwania", -"kwota_kredytu", -"wiek", -"liczba_kredytow")
+
+cramer_all <- function(dane.bez) {
+  
+  dane.bez[] <- lapply(dane.bez, as.factor)
+  
+  n <- ncol(dane.bez)
+  
+  wynik <- matrix(NA, n, n)
+  colnames(wynik) <- names(dane.bez)
+  rownames(wynik) <- names(dane.bez)
+  
+  for (i in 1:n) {
+    for (j in 1:n) {
+      tab <- table(dane.bez[[i]], dane.bez[[j]])
+      
+      if (all(dim(tab) > 1)) {
+        wynik[i, j] <- assocstats(tab)$cramer
+      }
+    }
+  }
+  
+  return(wynik)
+}
+
+macierz <- cramer_all(dane.bez)
+macierz
+```
+
+W przypadku par zmiennych jakościowych stosujemy współczynniki kontyngencji, np. V-Cramera - silna korelacja, gdy `V > 0.5`. Ze zbioru predyktorów nie usuwamy żadnej zmiennej, ponieważ nie stwierdziliśmy wzajemnego wyjaśniania się pomiędzy zmiennymi.
+
+Podzielono teraz zbiór danych na zmienne jakościowe i ilościowe. Zmienne jakościowe zmieniono na typ `factor`, żeby wydzialały konkretne grupy odpowiedzi.
+
+```{r}
+ilosciowe <- c("czas_trwania", "kwota_kredytu", "liczba_kredytow", "wiek")
+```
+
+```{r}
+jakosciowe <- c("status_konta", "historia_kredytowa", "cel", "oszczednosci", "zatrudnienie", 
+                "rata_proc_dochodu", "plec", "dluznicy", "zamieszkanie_lata", "majątek", 
+                "inne_plany", "mieszkanie", "zawod", "liczba_osob_na_utrzymaniu", "telefon", 
+                "pracownik_zagraniczny")
+dane[jakosciowe] <- lapply(dane[jakosciowe], as.factor)
+```
+
+Ponownie sprawdzono statystyki opisowe, tym razem zmienne są już zapisane w poprawnym schemacie.
+```{r echo=FALSE}
+summary(dane)
+```
+
+
+
+## IV
+
+Kolejnym krokiem jest sprawdzenie wartości IV zmiennych w celu wyznaczenia potencjalnych predyktorów.
+```{r echo=FALSE}
+options(scipen = 999)
+zmienne <- dane %>% select(-klasa, -czas) %>% names()
+
+iv_wyniki <- iv(
+  dane[, c(zmienne, "klasa")], y = "klasa") %>% arrange(desc(info_value))
+
+knitr::kable(iv_wyniki)
+```
+
+Dla 5 zmiennych otrzymaliśmy wartość IV mniejszą niż 0,02, dlatego nie będziemy ich uwzględniać w dalszej analizie. Są to zmienne: `liczba_kredytow`, `zawod`, `telefon`, `zamieszkanie_lata`, `liczba_osob_na_utrzymaniu`.
+
+## Gini
+
+Oprócz IV sprawdzono również wartości Gini czy są większe niż 0,05.
+```{r echo=FALSE}
+gini_results <- map_dfr(zmienne, function(v) {
+
+  model <- glm(
+    as.formula(paste("klasa ~", v)),
+    data = dane,
+    family = binomial
+  )
+
+  pred <- predict(model, type = "response")
+
+  auc_value <- auc(roc(model$y, pred, quiet = TRUE))
+
+  tibble(
+    Zmienna = v,
+    Gini = round(2 * as.numeric(auc_value) - 1, 3)
+  )
+}) %>%
+  arrange(desc(Gini))
+
+knitr::kable(gini_results)
+```
+
+Dla 5 zmiennych otrzymaliśmy wartość Gini mniejszą niż 0,05, są to zmienne: `zawod`, `telefon`, `pracownik_zagraniczny`, `zamieszkanie_lata` i  `liczba_osob_na_utrzymaniu`, dlatego nie będziemy ich uwzględniać w dalszej analizie.
+
+Zmienne, które nie spełniały kryterium IV i Gini nie będą wykorzystywane w dalszej analizie, ponieważ nie zwrócą żadnej istotnej informacji, zatem usuwamy je ze zbioru.
+```{r include=FALSE}
+dane <- dane %>% select(-"liczba_kredytow", -"zawod", -"telefon", -"zamieszkanie_lata",
+                         -"liczba_osob_na_utrzymaniu", -"pracownik_zagraniczny")
+```
+
+
+# Dyskretyzacja zmiennych
+
+Po przeprowadzonej analizie wstępnej można przystąpić do dyskretyzacji pozostałych zmiennych. W tym celu utworzono nową tabelę danych `dane_dys`, która będzie przechowywać zdyskretyzowane zmienne.
+
+```{r include=FALSE}
+dane_dys <- dane %>% select(klasa)
+```
+
+Dyskretyzację przeprowadzono w taki sposób, żeby poszczególne zmienne spełniały:
+
+- liczebność w każdej grupie jest przynajmniej 5% całych danych (w tym przypadku co najmniej 50 jednostek)
+
+- w każdej grupie jest przynajmniej 5% reprezentantów klientów złych
+
+- różnia WOE między kolejnymi grupami wynosi co najmniej 20
+
+- wartość IV powinna być w miarę wysoka (> 0,02)
+
+## wiek
+```{r echo=FALSE}
+dane_dys$wiek_BIN <- cut(
+  dane$wiek,
+  breaks = c(0, 22, 25, 34, Inf),
+  labels = c(
+    "0-22",
+    "23-25",
+    "26-34",
+    "35+"
+  ),
+  include.lowest = TRUE
+)
+
+wynik <- dane_dys %>%
+  group_by(wiek_BIN) %>%
+  summarise(
+    Suma = n(),
+    Liczba_dobrych = sum(klasa == 1),
+    Liczba_zlych = sum(klasa == 0),
+    Procent_dobrych = round((sum(klasa == 1) / sum(dane$klasa == 1)) * 100, 2),
+    Procent_zlych = round((sum(klasa == 0) / sum(dane$klasa == 0)) * 100, 2),
+    IV_suma = iv(dane_dys[, c("wiek_BIN", "klasa")], y = "klasa")$info_value,
+    WoE = round(log( (sum(klasa == 1) / sum(dane$klasa == 1)) / 
+                     (sum(klasa == 0) / sum(dane$klasa == 0)) ), 4) * 100
+    )
+
+knitr::kable(wynik)
+```
+
+```{r echo=FALSE}
+ggplot(wynik, aes(x = wiek_BIN, y = WoE)) +
+  geom_col(fill = "darkorange2") +
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  labs(x = "Wiek_BIN", y = "WoE", title = "WoE dla zmiennej wiek") +
+  theme_minimal() + 
+  theme(
+    plot.title = element_text(hjust = 0.5))
+```
+
+
+## cel
+
+```{r echo=FALSE}
+dane_dys$cel_BIN <- fct_collapse(
+  as.factor(dane$cel),
+  "edukacja/meble/inne" = c("edukacja", "inne", "meble"),
+  "pozostale" = c("auto używane", "biznes", "naprawy", "przekwalifikowanie", "AGD")
+)
+
+wynik <- dane_dys %>%
+  group_by(cel_BIN) %>%
+  summarise(
+    Suma = n(),
+    Liczba_dobrych = sum(klasa == 1),
+    Liczba_zlych = sum(klasa == 0),
+    Procent_dobrych = round((sum(klasa == 1) / sum(dane$klasa == 1)) * 100, 2),
+    Procent_zlych = round((sum(klasa == 0) / sum(dane$klasa == 0)) * 100, 2),
+    IV_suma = iv(dane_dys[, c("cel_BIN", "klasa")], y = "klasa")$info_value,
+    WoE = round(log( (sum(klasa == 1) / sum(dane$klasa == 1)) / 
+                     (sum(klasa == 0) / sum(dane$klasa == 0)) ), 4) * 100
+    )
+
+knitr::kable(wynik)
+```
+
+```{r echo=FALSE}
+ggplot(wynik, aes(x = cel_BIN, y = WoE)) +
+  geom_col(fill = "darkorange2") +
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  labs(x = "Cel_BIN", y = "WoE", title = "WoE dla zmiennej cel") +
+  theme_minimal() + 
+  theme(
+    plot.title = element_text(hjust = 0.5))
+```
+
+## status konta
+```{r echo=FALSE}
+dane_dys$status_konta_BIN <- fct_collapse(
+  as.factor(dane$status_konta),
+  ">0 DM" = c("0-200 DM", ">=200 DM")
+)
+
+wynik <- dane_dys %>%
+  group_by(status_konta_BIN) %>%
+  summarise(
+    Suma = n(),
+    Liczba_dobrych = sum(klasa == 1),
+    Liczba_zlych = sum(klasa == 0),
+    Procent_dobrych = round((sum(klasa == 1) / sum(dane$klasa == 1)) * 100, 2),
+    Procent_zlych = round((sum(klasa == 0) / sum(dane$klasa == 0)) * 100, 2),
+    IV_suma = iv(dane_dys[, c("status_konta_BIN", "klasa")], y = "klasa")$info_value,
+    WoE = round(log( (sum(klasa == 1) / sum(dane$klasa == 1)) / 
+                     (sum(klasa == 0) / sum(dane$klasa == 0)) ), 4) * 100
+    )
+
+knitr::kable(wynik)
+```
+
+```{r echo=FALSE}
+ggplot(wynik, aes(x = status_konta_BIN, y = WoE)) +
+  geom_col(fill = "darkorange2") +
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  labs(x = "Status_konta_BIN", y = "WoE", title = "WoE dla zmiennej status konta") +
+  theme_minimal() + 
+  theme(
+    plot.title = element_text(hjust = 0.5))
+```
+
+## historia kredytowa
+```{r echo=FALSE}
+dane_dys$historia_kredytowa_BIN <- fct_collapse(
+  as.factor(dane$historia_kredytowa),
+  "brak/splacone" = c("brak kredytów", "wszystkie spłacone (bank)"))
+
+wynik <- dane_dys %>%
+  group_by(historia_kredytowa_BIN) %>%
+  summarise(
+    Suma = n(),
+    Liczba_dobrych = sum(klasa == 1),
+    Liczba_zlych = sum(klasa == 0),
+    Procent_dobrych = round((sum(klasa == 1) / sum(dane$klasa == 1)) * 100, 2),
+    Procent_zlych = round((sum(klasa == 0) / sum(dane$klasa == 0)) * 100, 2),
+    IV_suma = iv(dane_dys[, c("historia_kredytowa_BIN", "klasa")], y = "klasa")$info_value,
+    WoE = round(log( (sum(klasa == 1) / sum(dane$klasa == 1)) / 
+                     (sum(klasa == 0) / sum(dane$klasa == 0)) ), 4) * 100)
+
+knitr::kable(wynik)
+```
+
+```{r echo=FALSE}
+ggplot(wynik, aes(x = historia_kredytowa_BIN, y = WoE)) +
+  geom_col(fill = "darkorange2") +
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  labs(x = "Historia_kredytowa_BIN", y = "WoE", title = "WoE dla zmiennej historia kredytowa") +
+  theme_minimal() + 
+  theme(
+    plot.title = element_text(hjust = 0.5))
+```
+
+
+## czas trwania
+```{r echo=FALSE}
+dane_dys$czas_trwania_BIN <- cut(
+  dane$czas_trwania,
+  breaks = c(0, 11, 15, 34, 44, Inf),
+  labels = c(
+    "0-11",
+    "12-15",
+    "16-34",
+    "35-44",
+    "45+"
+  ),
+  include.lowest = TRUE)
+
+wynik <- dane_dys %>%
+  group_by(czas_trwania_BIN) %>%
+  summarise(
+    Suma = n(),
+    Liczba_dobrych = sum(klasa == 1),
+    Liczba_zlych = sum(klasa == 0),
+    Procent_dobrych = round((sum(klasa == 1) / sum(dane$klasa == 1)) * 100, 2),
+    Procent_zlych = round((sum(klasa == 0) / sum(dane$klasa == 0)) * 100, 2),
+    IV_suma = iv(dane_dys[, c("czas_trwania_BIN", "klasa")], y = "klasa")$info_value,
+    WoE = round(log( (sum(klasa == 1) / sum(dane$klasa == 1)) / 
+                     (sum(klasa == 0) / sum(dane$klasa == 0)) ), 4) * 100)
+
+knitr::kable(wynik)
+```
+
+```{r echo=FALSE}
+ggplot(wynik, aes(x = czas_trwania_BIN, y = WoE)) +
+  geom_col(fill = "darkorange2") +
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  labs(x = "Czas_trwania_BIN", y = "WoE", title = "WoE dla zmiennej czas trwania") +
+  theme_minimal() + 
+  theme(
+    plot.title = element_text(hjust = 0.5))
+```
+
+## oszczednosci
+```{r echo=FALSE}
+dane_dys$oszczednosci_BIN <- fct_collapse(
+  as.factor(dane$oszczednosci),
+  "1-500" = c("<100", "100-500"),
+  ">500"= c( "500-1000", ">=1000"))
+
+
+wynik <- dane_dys %>%
+  group_by(oszczednosci_BIN) %>%
+  summarise(
+    Suma = n(),
+    Liczba_dobrych = sum(klasa == 1),
+    Liczba_zlych = sum(klasa == 0),
+    Procent_dobrych = round((sum(klasa == 1) / sum(dane$klasa == 1)) * 100, 2),
+    Procent_zlych = round((sum(klasa == 0) / sum(dane$klasa == 0)) * 100, 2),
+    IV_suma = iv(dane_dys[, c("oszczednosci_BIN", "klasa")], y = "klasa")$info_value,
+    WoE = round(log( (sum(klasa == 1) / sum(dane$klasa == 1)) / 
+                     (sum(klasa == 0) / sum(dane$klasa == 0)) ), 4) * 100)
+
+knitr::kable(wynik)
+```
+
+```{r echo=FALSE}
+ggplot(wynik, aes(x = oszczednosci_BIN, y = WoE)) +
+  geom_col(fill = "darkorange2") +
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  labs(x = "Oszczednosci_BIN", y = "WoE", title = "WoE dla zmiennej oszczednosci") +
+  theme_minimal() + 
+  theme(
+    plot.title = element_text(hjust = 0.5))
+```
+
+
+## kwota kredytu
+```{r echo=FALSE}
+dane_dys$kwota_kredytu_BIN <- cut(
+  dane$kwota_kredytu,
+  breaks = c(0, 2390, 3749, 7721, Inf),
+  labels = c(
+    "0-2390",
+    "2391-3749",
+    "3750-7721",
+    ">7721"
+  ), include.lowest = TRUE)
+
+wynik <- dane_dys %>%
+  group_by(kwota_kredytu_BIN) %>%
+  summarise(
+    Suma = n(),
+    Liczba_dobrych = sum(klasa == 1),
+    Liczba_zlych = sum(klasa == 0),
+    Procent_dobrych = round((sum(klasa == 1) / sum(dane$klasa == 1)) * 100, 2),
+    Procent_zlych = round((sum(klasa == 0) / sum(dane$klasa == 0)) * 100, 2),
+    IV_suma = iv(dane_dys[, c("kwota_kredytu_BIN", "klasa")], y = "klasa")$info_value,
+    WoE = round(log( (sum(klasa == 1) / sum(dane$klasa == 1)) / 
+                     (sum(klasa == 0) / sum(dane$klasa == 0)) ), 4) * 100)
+
+knitr::kable(wynik)
+```
+
+```{r echo=FALSE}
+ggplot(wynik, aes(x = kwota_kredytu_BIN, y = WoE)) +
+  geom_col(fill = "darkorange2") +
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  labs(x = "Kwota_kredytu_BIN", y = "WoE", title = "WoE dla zmiennej kwota kredytu") +
+  theme_minimal() + 
+  theme(
+    plot.title = element_text(hjust = 0.5))
+```
+
+
+## zatrudnienie
+```{r echo=FALSE}
+dane_dys$zatrudnienie_BIN <- fct_collapse(
+  as.factor(dane$zatrudnienie),
+  "bezrobotny/<1rok" = c("bezrobotny", "<1 rok"),
+  ">4lata" = c("4-7 lat", ">=7 lat"))
+
+dane_dys$zatrudnienie_BIN <- fct_relevel(
+  dane_dys$zatrudnienie_BIN, 
+  "bezrobotny/<1rok", "1-4 lata", ">4lata")
+
+wynik <- dane_dys %>%
+  group_by(zatrudnienie_BIN) %>%
+  summarise(
+    Suma = n(),
+    Liczba_dobrych = sum(klasa == 1),
+    Liczba_zlych = sum(klasa == 0),
+    Procent_dobrych = round((sum(klasa == 1) / sum(dane$klasa == 1)) * 100, 2),
+    Procent_zlych = round((sum(klasa == 0) / sum(dane$klasa == 0)) * 100, 2),
+    IV_suma = iv(dane_dys[, c("zatrudnienie_BIN", "klasa")], y = "klasa")$info_value,
+    WoE = round(log( (sum(klasa == 1) / sum(dane$klasa == 1)) / 
+                     (sum(klasa == 0) / sum(dane$klasa == 0)) ), 4) * 100)
+
+knitr::kable(wynik)
+```
+
+```{r echo=FALSE}
+ggplot(wynik, aes(x = zatrudnienie_BIN, y = WoE)) +
+  geom_col(fill = "darkorange2") +
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  labs(x = "Zatrudnienie_BIN", y = "WoE", title = "WoE dla zmiennej zatrudnienie") +
+  theme_minimal() + 
+  theme(
+    plot.title = element_text(hjust = 0.5))
+```
+
+
+## rata_proc_dochodu
+```{r echo=FALSE}
+dane_dys$rata_proc_dochodu_BIN <- fct_collapse(
+  as.factor(dane$rata_proc_dochodu),
+    "1-3" = c("1", "2", "3"))
+
+
+wynik <- dane_dys %>%
+  group_by(rata_proc_dochodu_BIN) %>%
+  summarise(
+    Suma = n(),
+    Liczba_dobrych = sum(klasa == 1),
+    Liczba_zlych = sum(klasa == 0),
+    Procent_dobrych = round((sum(klasa == 1) / sum(dane$klasa == 1)) * 100, 2),
+    Procent_zlych = round((sum(klasa == 0) / sum(dane$klasa == 0)) * 100, 2),
+    IV_suma = iv(dane_dys[, c("rata_proc_dochodu_BIN", "klasa")], y = "klasa")$info_value,
+    WoE = round(log( (sum(klasa == 1) / sum(dane$klasa == 1)) / 
+                     (sum(klasa == 0) / sum(dane$klasa == 0)) ), 4) * 100)
+
+knitr::kable(wynik, longtable = TRUE)
+```
+
+```{r echo=FALSE}
+ggplot(wynik, aes(x = rata_proc_dochodu_BIN, y = WoE)) +
+  geom_col(fill = "darkorange2") +
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  labs(x = "Rata_proc_dochodu_BIN", y = "WoE", title = "WoE dla zmiennej rata % dochodu") +
+  theme_minimal() + 
+  theme(
+    plot.title = element_text(hjust = 0.5))
+```
+
+
+## dluznicy
+```{r echo=FALSE}
+dane_dys$dluznicy_BIN <- fct_collapse(
+  as.factor(dane$dluznicy))
+
+wynik <- dane_dys %>%
+  group_by(dluznicy_BIN) %>%
+  summarise(
+    Suma = n(),
+    Liczba_dobrych = sum(klasa == 1),
+    Liczba_zlych = sum(klasa == 0),
+    Procent_dobrych = round((sum(klasa == 1) / sum(dane$klasa == 1)) * 100, 2),
+    Procent_zlych = round((sum(klasa == 0) / sum(dane$klasa == 0)) * 100, 2),
+    IV_suma = iv(dane_dys[, c("dluznicy_BIN", "klasa")], y = "klasa")$info_value,
+    WoE = round(log( (sum(klasa == 1) / sum(dane$klasa == 1)) / 
+                     (sum(klasa == 0) / sum(dane$klasa == 0)) ), 4) * 100)
+
+knitr::kable(wynik)
+```
+
+```{r echo=FALSE}
+ggplot(wynik, aes(x = dluznicy_BIN, y = WoE)) +
+  geom_col(fill = "darkorange2") +
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  labs(x = "Dluznicy_BIN", y = "WoE", title = "WoE dla zmiennej dluznicy") +
+  theme_minimal() + 
+  theme(
+    plot.title = element_text(hjust = 0.5))
+```
+
+```{r echo=FALSE}
+dane_dys$dluznicy_BIN <- fct_collapse(
+  as.factor(dane$dluznicy),
+  "wspol/zyrant" = c("współkredytobiorca", "żyrant"))
+
+wynik <- dane_dys %>%
+  group_by(dluznicy_BIN) %>%
+  summarise(
+    Suma = n(),
+    Liczba_dobrych = sum(klasa == 1),
+    Liczba_zlych = sum(klasa == 0),
+    Procent_dobrych = round((sum(klasa == 1) / sum(dane$klasa == 1)) * 100, 2),
+    Procent_zlych = round((sum(klasa == 0) / sum(dane$klasa == 0)) * 100, 2),
+    IV_suma = iv(dane_dys[, c("dluznicy_BIN", "klasa")], y = "klasa")$info_value,
+    WoE = round(log( (sum(klasa == 1) / sum(dane$klasa == 1)) / 
+                     (sum(klasa == 0) / sum(dane$klasa == 0)) ), 4) * 100)
+
+knitr::kable(wynik)
+```
+
+Nie da się stworzyć sensownej dyskretyzacji zmiennej, żeby spełnić założenia 5% obserwacji, 5% złych kredytobiorców, wartości IV > 0,02 i WoE z różnicą przynajmnniej 20, dlatego nie będziemu używać tej zmiennej w dalszej analizie.
+
+```{r include=FALSE}
+dane <- dane %>% select(-"dluznicy")
+dane_dys <- dane_dys %>% select(-"dluznicy_BIN")
+```
+
+
+## majatek
+```{r echo=FALSE}
+dane_dys$majatek_BIN <- fct_collapse(
+  as.factor(dane$majątek))
+
+wynik <- dane_dys %>%
+  group_by(majatek_BIN) %>%
+  summarise(
+    Suma = n(),
+    Liczba_dobrych = sum(klasa == 1),
+    Liczba_zlych = sum(klasa == 0),
+    Procent_dobrych = round((sum(klasa == 1) / sum(dane$klasa == 1)) * 100, 2),
+    Procent_zlych = round((sum(klasa == 0) / sum(dane$klasa == 0)) * 100, 2),
+    IV_suma = iv(dane_dys[, c("majatek_BIN", "klasa")], y = "klasa")$info_value,
+    WoE = round(log( (sum(klasa == 1) / sum(dane$klasa == 1)) / 
+                     (sum(klasa == 0) / sum(dane$klasa == 0)) ), 4) * 100)
+
+knitr::kable(wynik)
+```
+
+```{r echo=FALSE}
+ggplot(wynik, aes(x = majatek_BIN, y = WoE)) +
+  geom_col(fill = "darkorange2") +
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  labs(x = "Majatek_BIN", y = "WoE", title = "WoE dla zmiennej majatek") +
+  theme_minimal() + 
+  theme(
+    plot.title = element_text(hjust = 0.5))
+```
+
+
+## inne plany
+```{r echo=FALSE}
+dane_dys$inne_plany_BIN <- fct_collapse(
+  as.factor(dane$inne_plany),
+  "bank/sklep" = c("bank", "sklep"))
+
+wynik <- dane_dys %>%
+  group_by(inne_plany_BIN) %>%
+  summarise(
+    Suma = n(),
+    Liczba_dobrych = sum(klasa == 1),
+    Liczba_zlych = sum(klasa == 0),
+    Procent_dobrych = round((sum(klasa == 1) / sum(dane$klasa == 1)) * 100, 2),
+    Procent_zlych = round((sum(klasa == 0) / sum(dane$klasa == 0)) * 100, 2),
+    IV_suma = iv(dane_dys[, c("inne_plany_BIN", "klasa")], y = "klasa")$info_value,
+    WoE = round(log( (sum(klasa == 1) / sum(dane$klasa == 1)) / 
+                     (sum(klasa == 0) / sum(dane$klasa == 0)) ), 4) * 100)
+
+knitr::kable(wynik)
+```
+
+```{r echo=FALSE}
+ggplot(wynik, aes(x = inne_plany_BIN, y = WoE)) +
+  geom_col(fill = "darkorange2") +
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  labs(x = "Inne_plany_BIN", y = "WoE", title = "WoE dla zmiennej inne plany") +
+  theme_minimal() + 
+  theme(
+    plot.title = element_text(hjust = 0.5))
+```
+
+
+## mieszkanie
+```{r echo=FALSE}
+dane_dys$mieszkanie_BIN <- fct_collapse(
+  as.factor(dane$mieszkanie),
+  "wynajem/za_darmo" = c("wynajem", "za darmo"))
+
+wynik <- dane_dys %>%
+  group_by(mieszkanie_BIN) %>%
+  summarise(
+    Suma = n(),
+    Liczba_dobrych = sum(klasa == 1),
+    Liczba_zlych = sum(klasa == 0),
+    Procent_dobrych = round((sum(klasa == 1) / sum(dane$klasa == 1)) * 100, 2),
+    Procent_zlych = round((sum(klasa == 0) / sum(dane$klasa == 0)) * 100, 2),
+    IV_suma = iv(dane_dys[, c("mieszkanie_BIN", "klasa")], y = "klasa")$info_value,
+    WoE = round(log( (sum(klasa == 1) / sum(dane$klasa == 1)) / 
+                     (sum(klasa == 0) / sum(dane$klasa == 0)) ), 4) * 100)
+
+knitr::kable(wynik)
+```
+
+```{r echo=FALSE}
+ggplot(wynik, aes(x = mieszkanie_BIN, y = WoE)) +
+  geom_col(fill = "darkorange2") +
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  labs(x = "Mieszkanie_BIN", y = "WoE", title = "WoE dla zmiennej mieszkanie") +
+  theme_minimal() + 
+  theme(
+    plot.title = element_text(hjust = 0.5))
+```
+
+
+## IV po dyskretyzacji
+Po przeprowadzonej dyskretyzacji ponownie sprawdzono wartość IV tym razem dla zmiennych dyskretyzowanych.
+```{r echo=FALSE}
+iv_wyniki <- iv(
+  dane_dys, y = "klasa") %>% arrange(desc(info_value))
+
+knitr::kable(iv_wyniki)
+```
+
+Otrzymano wyniki IV wszystkie większe od 0,02.
+
+## Gini
+Oprócz IV sprawdzono również wartości Gini czy są większe niż 0,05.
+```{r echo=FALSE}
+zmienne <- dane_dys %>% select(-klasa) %>% names()
+gini_results <- map_dfr(zmienne, function(v) {
+
+  model <- glm(
+    as.formula(paste("klasa ~", v)),
+    data = dane_dys,
+    family = binomial
+  )
+
+  pred <- predict(model, type = "response")
+
+  auc_value <- auc(roc(model$y, pred, quiet = TRUE))
+
+  tibble(
+    Zmienna = v,
+    Gini = round(2 * as.numeric(auc_value) - 1, 3)
+  )
+}) %>%
+  arrange(desc(Gini))
+
+knitr::kable(gini_results)
+```
+
+Otrzymano wyniki współczynnika Giniego wszystkie większe od 0,05.
+
+
+# Wstępny model bez interakcji
+Wyznaczono model wstępny bez interakcji ze zdyskretyzowanymi zmiennymi, żeby zbadać współliniowość zmiennych i istotność badanych zmiennych.
+```{r}
+m_wstepny <- glm(klasa ~ ., data = dane_dys, family = binomial)
+```
+
+```{r echo=FALSE}
+lrtest(m_wstepny)
+```
+
+Test ilorazu wiarygodności zwrócił wynik sugerujący, że model ze zmiennymi jest lepszy niż model bez żadnych zmiennych objaśniających.
+
+```{r echo=FALSE}
+knitr::kable(vif(m_wstepny))
+```
+
+Z badania współliniwości otrzymano, że żadna zmienna nie wykazuje współliniowości względem wyników, wszystkie zmienne otrzymały wartości zbliżone do 1.
+
+
+# Interakcje
+
+W celu budowy optymalnej przestrzeni interakcji, do generowania par zmiennych zakwalifikowano wyłącznie cechy charakteryzujące się co najmniej średnią mocą predykcyjną ($IV \ge 0.10$), zgodnie z powszechnie akceptowaną w bankowości klasyfikacją. Odrzucenie zmiennych o $IV < 0.10$ na etapie tworzenia interakcji miało na celu eliminację cech o niskim potencjale informacyjnym, które w parach generowałyby szum statystyczny zamiast stabilnego sygnału ryzyka. Pozwoliło to na redukcję przestrzeni kombinatorycznej z 66 możliwych par do zaledwie 21 unikalnych kombinacji. Taki zabieg radykalnie zmniejsza ryzyko przeuczenia modelu oraz drastycznie ogranicza liczbę stopni swobody, co jest kluczowe dla zachowania stabilności i generalizacji matematycznej modelu na próbach walidacyjnych.
+
+Zastosowaliśmy dwuetapowe sito selekcji: najpierw odrzuciliśmy zmienne, które same w sobie były zbyt słabe, żeby ich relacje mogły przynieść stabilną wartość dodaną, a dopiero w drugim kroku badaliśmy przyrost czystej mocy predykcyjnej ($Incremental\ IV$) dla powstałych 21 par, co pozwoliło nam wyłonić ostateczne, silne i zdywersyfikowane biznesowo interakcje”.
+
+```{r}
+zmienne_bin <- c("status_konta_BIN", "historia_kredytowa_BIN", "czas_trwania_BIN", 
+                "oszczednosci_BIN", "kwota_kredytu_BIN", "majatek_BIN", "wiek_BIN")
+```
+
+Po wybraniu konkretnych zmiennych, z których tworzone będą interakcje, stworzono nową tabelę danych, która będzie zawierać 21 możliwych kombinacji zmiennych.
+```{r echo=FALSE}
+pary_kombinacji <- combn(zmienne_bin, 2)
+dane_int <- dane_dys
+
+for(i in 1:ncol(pary_kombinacji)) {
+  var1 <- pary_kombinacji[1, i]
+  var2 <- pary_kombinacji[2, i]
+  
+  nowa_nazwa <- paste(var1, var2, sep = "x")
+
+  dane_int[[nowa_nazwa]] <- as.factor(paste(dane_int[[var1]], dane_int[[var2]], sep = " x "))}
+
+knitr::kable(colnames(dane_int[, 14:34]))
+```
+
+Kolejnym krokiem jest ponowne ograniczenie zbioru 21 interakcji do mniejszej liczby. Tym razem zasugerowano się, aby wartość IV > 0,45 dla wyselekcjonowanych interakcji.
+```{r echo=FALSE}
+iv_result <- iv(
+  dane_int,
+  y = "klasa"
+)
+
+iv_result <- iv_result %>%
+  filter(info_value > 0.45) %>%
+  arrange(desc(info_value))
+
+knitr::kable(iv_result)
+```
+
+Dodatkowo interakcje ze zmienną `status_konta` mogą powodować przeuczenie modelu, ponieważ osiągają bardzo duże wartości IV, z tego powodu wybrano z nich tylko 2 największe. Dzięki temu otrzymano ostatecznie 8 interakcji, które wymieniono poniżej: 
+
+- `historia_kredytowa_BINxwiek_BIN`, 
+
+- `czas_trwania_BINxwiek_BIN`, 
+
+- `historia_kredytowa_BINxkwota_kredytu_BIN`, 
+
+- `historia_kredytowa_BINxoszczednosci_BIN`, 
+
+- `czas_trwania_BINxoszczednosci_BIN`, 
+
+- `historia_kredytowa_BINxczas_trwania_BIN`,
+
+- `status_konta_BINxhistoria_kredytowa_BIN`,
+
+- `status_konta_BINxczas_trwania_BIN`
+
+Następnie sprawdzono czy wymienione powyżej interakcje dodałyby statystycznie istotnej informacji do modelu wstępnego. Z tego powodu przeprowadzono test ilorazu wiarygodności porównujący dwa modele, który zwraca wartość p-value o tym czy model z interakcją jest "lepszy" niż model bez interakcji. Hipoteza zerowa zakłada, że dodanie interakcji nie poprawia dopasowania modelu, czyli że wszystkie dodatkowe parametry mają wartość 0 i model bardziej złożony nie wnosi istotnej informacji. Alternatywa mówi, że przynajmniej część efektu interakcji jest istotna.
+
+## Sprawdzenie istotności interakcji
+
+**historia kredytowa x wiek**
+
+```{r echo=FALSE}
+m1 <- glm(klasa ~ . + historia_kredytowa_BIN:wiek_BIN,
+          data = dane_dys, family = binomial)
+
+anova(m_wstepny, m1, test = "Chisq")
+```
+
+Model z interakcją historia_kredytowa_BINxwiek_BIN został porównany z modelem bez tej interakcji za pomocą testu ilorazu wiarygodności. Otrzymany wynik (p = 0.021) pozwala odrzucić hipotezę zerową na poziomie istotności 0.05. Oznacza to, że model z interakcją istotnie lepiej dopasowuje dane niż model bez niej. W praktyce wskazuje to, że wpływ historii kredytowej na ryzyko kredytowe zależy od wieku klienta.
+
+**czas trwania x wiek**
+
+```{r echo=FALSE}
+m2 <- glm(klasa ~ . + czas_trwania_BIN:wiek_BIN,
+          data = dane_dys, family = binomial)
+
+anova(m_wstepny, m2, test = "Chisq")
+```
+
+Model z interakcją czas_trwania_BINxwiek_BIN został porównany z modelem bez tej interakcji za pomocą testu ilorazu wiarygodności. Otrzymany wynik (p = 0.03946) pozwala odrzucić hipotezę zerową na poziomie istotności 0.05. Oznacza to, że model z interakcją istotnie lepiej dopasowuje dane niż model bez niej. W praktyce wskazuje to, że wpływ czasu trwania na ryzyko kredytowe zależy od wieku klienta.
+
+**historia kredytowa x kwota kredytu**
+```{r echo=FALSE}
+m3 <- glm(klasa ~ . + historia_kredytowa_BIN:kwota_kredytu_BIN,
+          data = dane_dys,
+          family = binomial)
+
+anova(m_wstepny, m3, test = "Chisq")
+```
+
+Model z interakcją historia_kredytowa_BINxkwota_kredytu_BIN został porównany z modelem bez tej interakcji za pomocą testu ilorazu wiarygodności. Otrzymany wynik (p = 0.02105) pozwala odrzucić hipotezę zerową na poziomie istotności 0.05. Oznacza to, że model z interakcją istotnie lepiej dopasowuje dane niż model bez niej. W praktyce wskazuje to, że wpływ historii kredytowej na ryzyko kredytowe zależy od kwoty kredytu.
+
+**historia kredytowa x oszczednosci**
+
+```{r echo=FALSE}
+m4 <- glm(klasa ~ . + historia_kredytowa_BIN:oszczednosci_BIN,
+          data = dane_dys,
+          family = binomial)
+
+anova(m_wstepny, m4, test = "Chisq")
+```
+
+Model z interakcją historia_kredytowa_BINxoszczednosci_BIN został porównany z modelem bez tej interakcji za pomocą testu ilorazu wiarygodności. Otrzymany wynik (p = 0.008188) pozwala odrzucić hipotezę zerową na poziomie istotności 0.05. Oznacza to, że model z interakcją istotnie lepiej dopasowuje dane niż model bez niej. W praktyce wskazuje to, że wpływ historii kredytowej na ryzyko kredytowe zależy od oszczednosci klienta.
+
+**czas trwania x oszczednosci**
+```{r echo=FALSE}
+m5 <- glm(klasa ~ . + czas_trwania_BIN:oszczednosci_BIN,
+          data = dane_dys,
+          family = binomial)
+
+anova(m_wstepny, m5, test = "Chisq")
+```
+
+Model z interakcją czas_trwania_BINxoszczednosci_BIN został porównany z modelem bez tej interakcji za pomocą testu ilorazu wiarygodności. Otrzymany wynik (p = 0.005159) pozwala odrzucić hipotezę zerową na poziomie istotności 0.05. Oznacza to, że model z interakcją istotnie lepiej dopasowuje dane niż model bez niej. W praktyce wskazuje to, że wpływ czasu trwania kredytu na ryzyko kredytowe zależy od wysokości oszczędności klienta.
+
+**historia kredytowa x czas trwania**
+```{r echo=FALSE}
+m6 <- glm(klasa ~ . + historia_kredytowa_BIN:czas_trwania_BIN,
+          data = dane_dys,
+          family = binomial)
+
+anova(m_wstepny, m6, test = "Chisq")
+```
+
+Model z interakcją historia_kredytowa_BIN×czas_trwania_BIN został porównany z modelem bez tej interakcji za pomocą testu ilorazu wiarygodności. Otrzymany wynik (p = 0.3364) nie odrzuca hipotezy zerowej na poziomie istotności 0.05. Oznacza to, że model z interakcją nie wnosi żadnej istotnej informacji.
+
+**status konta x historia kredytowa**
+```{r echo=FALSE}
+m7 <- glm(klasa ~ . + status_konta_BIN:historia_kredytowa_BIN,
+          data = dane_dys,
+          family = binomial)
+
+anova(m_wstepny, m7, test = "Chisq")
+```
+
+Model z interakcją status_konta_BINxhistoria_kredytowa_BIN został porównany z modelem bez tej interakcji za pomocą testu ilorazu wiarygodności. Otrzymany wynik (p = 0.04883) pozwala odrzucić hipotezę zerową na poziomie istotności 0.05. Oznacza to, że model z interakcją istotnie lepiej dopasowuje dane niż model bez niej. W praktyce wskazuje to, że wpływ statusu konta klienta na ryzyko kredytowe zależy od historii kredytowej klienta.
+
+**status konta x czas trwania**
+```{r echo=FALSE}
+m8 <- glm(klasa ~ . + status_konta_BIN:czas_trwania_BIN,
+          data = dane_dys,
+          family = binomial)
+
+anova(m_wstepny, m8, test = "Chisq")
+```
+
+Model z interakcją status_konta_BIN×czas_trwania_BIN został porównany z modelem bez tej interakcji za pomocą testu ilorazu wiarygodności. Otrzymany wynik (p = 0.5704) nie odrzuca hipotezy zerowej na poziomie istotności 0.05. Oznacza to, że model z interakcją nie wnosi żadnej istotnej informacji.
+
+Na tej podstawie do dalszej analizy wybrano 6 interakcji, które zostaną teraz przedstawione w jednym modelu i ponownie porównane z modele wstępnym, są to następujące kombinacje:
+
+- `status_konta_BINxhistoria_kredytowa_BIN`
+
+- `czas_trwania_BINxoszczednosci_BIN`
+
+- `czas_trwania_BINxwiek_BIN`
+
+- `historia_kredytowa_BINxoszczednosci_BIN`
+
+- `historia_kredytowa_BINxkwota_kredytu_BIN`
+
+- `historia_kredytowa_BINxwiek_BIN`
+
+```{r echo=FALSE}
+m_int <- glm(klasa ~ . + status_konta_BIN:historia_kredytowa_BIN + 
+            czas_trwania_BIN:oszczednosci_BIN + czas_trwania_BIN:wiek_BIN +
+            historia_kredytowa_BIN:oszczednosci_BIN + historia_kredytowa_BIN:kwota_kredytu_BIN +
+            historia_kredytowa_BIN:wiek_BIN,
+          data = dane_dys, family = binomial)
+
+anova(m_wstepny, m_int, test = "Chisq")
+```
+
+Model ze wszystkimi istotnymi interakcjami został porównany z modelem bez tej interakcji za pomocą testu ilorazu wiarygodności. Otrzymany wynik (p = 0.00006676) pozwala odrzucić hipotezę zerową na poziomie istotności 0.05. Oznacza to, że model z interakcjami istotnie lepiej dopasowuje dane niż model bez niej, zatem przeprowadzona zostanie dyskretyzacja tych interakcji.
+
+
+# Dyskretyzacja interakcji
+Do dyskretyzacji interakcji wykorzystano te same kryteria, co do dyskretyzacji pojedynczych zmiennych.
+
+## status_konta_BINxhistoria_kredytowa_BIN
+```{r echo=FALSE, paged.print=FALSE}
+dane_dys$status_konta_BINxhistoria_kredytowa_BIN <- fct_collapse(
+  as.factor(dane_int$status_konta_BINxhistoria_kredytowa_BIN),
+  ">0DM/brak konta x opóźnienia" = c(">0 DM x opóźnienia", "brak konta x opóźnienia"),
+  "brak konta x brak/splacone/konto krytyczne/splacane terminowo" = c("brak konta x brak/splacone", "brak konta x konto krytyczne", "brak konta x spłacane terminowo"),
+  "brak/splacone x <0DMopoznione/>0DM" = c("<0 DM x brak/splacone", "<0 DM x opóźnienia", ">0 DM x brak/splacone")
+)
+
+wynik <- dane_dys %>%
+  group_by(status_konta_BINxhistoria_kredytowa_BIN) %>%
+  summarise(
+    Suma = n(),
+    L_dobrych = sum(klasa == 1),
+    L_zlych = sum(klasa == 0),
+    '%_dobrych' = round((sum(klasa == 1) / sum(dane$klasa == 1)) * 100, 2),
+    '%_zlych' = round((sum(klasa == 0) / sum(dane$klasa == 0)) * 100, 2),
+    IV_suma = iv(dane_dys[, c("status_konta_BINxhistoria_kredytowa_BIN", "klasa")], y = "klasa")$info_value,
+    WoE = round(log( (sum(klasa == 1) / sum(dane$klasa == 1)) / 
+                     (sum(klasa == 0) / sum(dane$klasa == 0)) ), 4) * 100
+    )
+
+knitr::kable(wynik, longtable = TRUE)
+```
+
+## czas_trwania_BINxwiek_BIN
+```{r echo=FALSE}
+dane_dys$czas_trwania_BINxwiek_BIN <- fct_collapse(
+  as.factor(dane_int$czas_trwania_BINxwiek_BIN),
+  "0-11/16-34 x 0-25" = c("0-11 x 0-22", "16-34 x 0-22", "16-34 x 23-25"),
+  "0-15 x 23-34" = c("0-11 x 23-25", "12-15 x 0-22", "12-15 x 26-34"),
+  "0-15 x 26+" = c("0-11 x 26-34", "12-15 x 35+", "0-11 x 35+"),
+  "12-44 x 23+" = c("12-15 x 23-25", "35-44 x 35+", "16-34 x 26-34", "16-34 x 35+"),
+  "45+ x 0-22/26+" = c("45+ x 35+", "45+ x 26-34", "45+ x 0-22"),
+  "35+ x 23-34" = c("45+ x 23-25", "35-44 x 23-25", "35-44 x 26-34")
+)
+
+wynik <- dane_dys %>%
+  group_by(czas_trwania_BINxwiek_BIN) %>%
+  summarise(
+    Suma = n(),
+    L_dobrych = sum(klasa == 1),
+    L_zlych = sum(klasa == 0),
+    '%_dobrych' = round((sum(klasa == 1) / sum(dane$klasa == 1)) * 100, 2),
+    '%_zlych' = round((sum(klasa == 0) / sum(dane$klasa == 0)) * 100, 2),
+    IV_suma = iv(dane_dys[, c("czas_trwania_BINxwiek_BIN", "klasa")], y = "klasa")$info_value,
+    WoE = round(log( (sum(klasa == 1) / sum(dane$klasa == 1)) / 
+                     (sum(klasa == 0) / sum(dane$klasa == 0)) ), 4) * 100
+    )
+
+knitr::kable(wynik, longtable = TRUE)
+```
+
+## historia_kredytowa_BINxoszczednosci_BIN
+```{r echo=FALSE}
+dane_dys$historia_kredytowa_BINxoszczednosci_BIN <- fct_collapse(
+  as.factor(dane_int$historia_kredytowa_BINxoszczednosci_BIN),
+  "kk/op/spt x brak/>500" = c("konto krytyczne x >500", "konto krytyczne x brak/nieznane", "opóźnienia x brak/nieznane", "spłacane terminowo x >500"),
+  "brak/sp/spt/op x brak/>1" = c("brak/splacone x brak/nieznane", "spłacane terminowo x 1-500", "opóźnienia x >500", "opóźnienia x 1-500"),
+  "brak/sp/spt x brak/>500" = c("brak/splacone x >500", "spłacane terminowo x brak/nieznane")
+)
+
+wynik <- dane_dys %>%
+  group_by(historia_kredytowa_BINxoszczednosci_BIN) %>%
+  summarise(
+    Suma = n(),
+    L_dobrych = sum(klasa == 1),
+    L_zlych = sum(klasa == 0),
+    '%_dobrych' = round((sum(klasa == 1) / sum(dane$klasa == 1)) * 100, 2),
+    '%_zlych' = round((sum(klasa == 0) / sum(dane$klasa == 0)) * 100, 2),
+    IV_suma = iv(dane_dys[, c("historia_kredytowa_BINxoszczednosci_BIN", "klasa")], y = "klasa")$info_value,
+    WoE = round(log( (sum(klasa == 1) / sum(dane$klasa == 1)) / 
+                     (sum(klasa == 0) / sum(dane$klasa == 0)) ), 4) * 100
+    )
+
+knitr::kable(wynik, longtable = TRUE)
+```
+
+## historia_kredytowa_BINxkwota_kredytu_BIN
+```{r echo=FALSE}
+dane_dys$historia_kredytowa_BINxkwota_kredytu_BIN <- fct_collapse(
+  as.factor(dane_int$historia_kredytowa_BINxkwota_kredytu_BIN),
+  "brak/sp/spt x 0-2390/>3750" = c("brak/splacone x 0-2390", "brak/splacone x 3750-7721", "spłacane terminowo x >7721"),
+  "op/spt x 0-2390/>3750" = c("opóźnienia x >7721", "opóźnienia x 3750-7721", "spłacane terminowo x 0-2390"),
+  "brak/sp/op/spt x >0" = c("brak/splacone x 2391-3749", "opóźnienia x 0-2390", "spłacane terminowo x 3750-7721", "konto krytyczne x >7721", "brak/splacone x >7721"),
+  "kk/op/spt x 2391-7721" = c("konto krytyczne x 3750-7721", "opóźnienia x 2391-3749", "spłacane terminowo x 2391-3749"),
+  "kk x 0-3749" = c("konto krytyczne x 0-2390", "konto krytyczne x 2391-3749")
+)
+
+wynik <- dane_dys %>%
+  group_by(historia_kredytowa_BINxkwota_kredytu_BIN) %>%
+  summarise(
+    Suma = n(),
+    L_dobrych = sum(klasa == 1),
+    L_zlych = sum(klasa == 0),
+    '%_dobrych' = round((sum(klasa == 1) / sum(dane$klasa == 1)) * 100, 2),
+    '%_zlych' = round((sum(klasa == 0) / sum(dane$klasa == 0)) * 100, 2),
+    IV_suma = iv(dane_dys[, c("historia_kredytowa_BINxkwota_kredytu_BIN", "klasa")], y = "klasa")$info_value,
+    WoE = round(log( (sum(klasa == 1) / sum(dane$klasa == 1)) / 
+                     (sum(klasa == 0) / sum(dane$klasa == 0)) ), 4) * 100
+    )
+
+knitr::kable(wynik, longtable = TRUE)
+```
+
+## historia_kredytowa_BINxwiek_BIN
+```{r echo=FALSE}
+dane_dys$historia_kredytowa_BINxwiek_BIN <- fct_collapse(
+  as.factor(dane_int$historia_kredytowa_BINxwiek_BIN),
+  "kk/brak/sp x 0-22/35+" = c("konto krytyczne x 35+", "brak/splacone x 0-22", "konto krytyczne x 0-22"),
+  "brak/sp x 23+" = c("brak/splacone x 23-25", "brak/splacone x 26-34", "brak/splacone x 35+"),
+  "kk/spt.op x 0-25/35+" = c("konto krytyczne x 23-25", "spłacane terminowo x 0-22", "opóźnienia x 0-22", "opóźnienia x 35+", "spłacane terminowo x 23-25"),
+  "op/kk x 23-34" = c("opóźnienia x 23-25", "konto krytyczne x 26-34"),
+  "op/spt x 26+" = c("opóźnienia x 26-34", "spłacane terminowo x 26-34", "spłacane terminowo x 35+")
+)
+
+wynik <- dane_dys %>%
+  group_by(historia_kredytowa_BINxwiek_BIN) %>%
+  summarise(
+    Suma = n(),
+    L_dobrych = sum(klasa == 1),
+    L_zlych = sum(klasa == 0),
+    '%_dobrych' = round((sum(klasa == 1) / sum(dane$klasa == 1)) * 100, 2),
+    '%_zlych' = round((sum(klasa == 0) / sum(dane$klasa == 0)) * 100, 2),
+    IV_suma = iv(dane_dys[, c("historia_kredytowa_BINxwiek_BIN", "klasa")], y = "klasa")$info_value,
+    WoE = round(log( (sum(klasa == 1) / sum(dane$klasa == 1)) / 
+                     (sum(klasa == 0) / sum(dane$klasa == 0)) ), 4) * 100
+    )
+
+knitr::kable(wynik, longtable = TRUE)
+```
+
+## czas_trwania_BINxoszczednosci_BIN
+```{r echo=FALSE}
+dane_dys$czas_trwania_BINxoszczednosci_BIN <- fct_collapse(
+  as.factor(dane_int$czas_trwania_BINxoszczednosci_BIN),
+  ">0 x brak/>500" = c("0-11 x >500", "0-11 x brak/nieznane", "45+ x brak/nieznane", "35-44 x >500",
+                             "16-34 x >500", "12-15 x brak/nieznane"),
+  "0-15 x >1" = c("0-11 x 1-500", "12-15 x >500"),
+  "35+ x >1" = c("35-44 x 1-500", "45+ x >500", "45+ x 1-500"),
+  "12-15/35-44 x brak/1-500" = c("12-15 x 1-500", "35-44 x brak/nieznane")
+)
+
+wynik <- dane_dys %>%
+  group_by(czas_trwania_BINxoszczednosci_BIN) %>%
+  summarise(
+    Suma = n(),
+    L_dobrych = sum(klasa == 1),
+    L_zlych = sum(klasa == 0),
+    '%_dobrych' = round((sum(klasa == 1) / sum(dane$klasa == 1)) * 100, 2),
+    '%_zlych' = round((sum(klasa == 0) / sum(dane$klasa == 0)) * 100, 2),
+    IV_suma = iv(dane_dys[, c("czas_trwania_BINxoszczednosci_BIN", "klasa")], y = "klasa")$info_value,
+    WoE = round(log( (sum(klasa == 1) / sum(dane$klasa == 1)) / 
+                     (sum(klasa == 0) / sum(dane$klasa == 0)) ), 4) * 100
+    )
+
+knitr::kable(wynik, longtable = TRUE)
+```
+
+
+# Dane WoE
+Po przeprowadzonej dyskretyzacji interakcji kolejnym etapem jest utworzenie modelu z wartościami WoE otrzymanymi dla poszczególnych kategorii. W tym celu utworzono kolejną tabelę danych, która będzie przechowywać tylko wartości WoE dla poszczególnych kategorii.
+
+```{r include=FALSE}
+woe_map <- function(data, var) {
+  
+  woe_tbl <- data %>%
+    group_by(.data[[var]]) %>%
+    summarise(
+      good = sum(klasa == 1),
+      bad = sum(klasa == 0),
+      .groups = "drop"
+    ) %>%
+    mutate(
+      woe = (log((good / sum(good)) / (bad / sum(bad)))) * 100
+    ) %>%
+    select(all_of(var), woe)
+  
+  data %>%
+    left_join(woe_tbl, by = var) %>%
+    rename(!!paste0(var, "_WOE") := woe)
+}
+```
+
+```{r include=FALSE}
+dane_woe <- dane_dys
+zmienne_woe <- dane_dys %>% select(-klasa) %>% names()
+
+for (v in zmienne_woe) {
+  dane_woe <- woe_map(dane_woe, v)
+}
+```
+
+```{r include=FALSE}
+dane_woe <- dane_woe[, c(1, 20:37)]
+```
+
+```{r echo=FALSE}
+head(dane_woe)
+```
+
+```{r}
+model1 <- glm(klasa ~ ., data = dane_woe, family = "binomial")
+summary(model1)
+```
+
+Otrzymaliśmy ujemne wartości parametru Beta, zatem prawdopodobnie wśród wybranych interakcji pojawia się współliniowość, co zostanie sprawdzone za pomocą funkcji VIF.
+```{r echo=FALSE}
+vif(model1)
+```
+
+Otrzymaliśmy współliniowość dla niektórych zmiennych, zatem usuniemy interakcje, które powodują efekt współliniowości i powodują, że parametr Beta dostaje ujemne współczynniki.
+
+Ostatecznie po krokowym usuwaniu interakcji, które powodowały współliniwość została tylko jedna interakcja `czas_trwania_BINxoszczednosci_BIN`, zatem kolejne modele oparte będą na tej istotnej interakcji.
+```{r include=FALSE}
+dane_woe <- dane_dys
+zmienne_woe <- dane_dys %>% select(-klasa, -czas_trwania_BINxwiek_BIN,
+              - status_konta_BINxhistoria_kredytowa_BIN, -historia_kredytowa_BINxoszczednosci_BIN,
+              -historia_kredytowa_BINxkwota_kredytu_BIN, -historia_kredytowa_BINxwiek_BIN) %>% names()
+
+for (v in zmienne_woe) {
+  dane_woe <- woe_map(dane_woe, v)}
+```
+
+```{r include=FALSE}
+dane_woe <- dane_woe[, c(1, 20:32)]
+```
+
+```{r}
+model2 <- glm(klasa ~ ., data = dane_woe, family = "binomial")
+summary(model2)
+```
+
+Model z interakcją `czas_trwania_BINxoszczednosci_BIN_WOE` nie powoduje żadnych niepożadanych zachowań modelu. Sprawdzona zostanie jeszcze współliniowość zmiennych.
+```{r echo=FALSE}
+vif(model2)
+```
+
+Wszystkie zmienne otrzymały wynik współliniowości w normie, zatem udało się wyeliminować niekorzystne skutki współliniowych interakcji.
+
+
+# Walidacja krzyżowa i ocena modelu
+Kolejnym krokiem jest opracowanie modeli za pomocą różnych metod, przeprowadzenie walidacji krzyżowej, a następnie oceny otrzymanych modeli, żeby wyłonić najlepszy, który zostanie wykorzystany do opracowania punktów scoringowych kredytobiorców.
+
+W celu rzetelnej oceny stabilności modeli oraz uniknięcia zjawiska przeuczenia, proces estymacji parametrów oparty zostanie na technice walidacji krzyżowej. Na początku definiujemy ziarno generatora liczb losowych w celu zapewnienia pełnej replikowalności wyników oraz przygotowujemy zmienne objaśniające, uwzględniając transformację WoE oraz wybraną interakcję.
+```{r include=FALSE}
+# Gwarancja powtarzalności podziału na koszyki CV
+set.seed(12345)
+k_folds <- 5
+
+# Przygotowanie ramki danych opartej na Waszych transformacjach WoE
+dane_cv_proces <- dane_woe
+dane_cv_proces$klasa <- as.numeric(as.character(dane_cv_proces$klasa))
+
+# Automatyczne pobranie nazw zmiennych bazowych z końcówką _WOE
+zmienne_bazowe_woe <- setdiff(grep("_WOE$", names(dane_cv_proces), value = TRUE), "czas_trwania_BINxoszczednosci_BIN_WOE")
+interakcja_woe <- "czas_trwania_BINxoszczednosci_BIN_WOE"
+```
+
+Kluczowym elementem poprawnego podziału zbioru danych w modelowaniu ryzyka kredytowego jest zachowanie stałej proporcji klientów "dobrych" do "złych" w każdym z koszyków walidacyjnych. Zastosowanie losowania warstwowego gwarantuje, że podział $K$-krotny ($K=5$) nie zniekształci struktury domyślnej bazy danych, co mogłoby prowadzić do obciążenia oszacowań parametrów i zakłócenia miar jakości.
+```{r include=FALSE}
+# Generowanie koszyków walidacji
+indeksy_good <- which(dane_cv_proces$klasa == 1)
+indeksy_bad  <- which(dane_cv_proces$klasa == 0)
+
+folds_good <- sample(cut(seq_along(indeksy_good), breaks = k_folds, labels = FALSE))
+folds_bad  <- sample(cut(seq_along(indeksy_bad),  breaks = k_folds, labels = FALSE))
+
+dane_cv_proces$fold <- 0
+dane_cv_proces$fold[indeksy_good] <- folds_good
+dane_cv_proces$fold[indeksy_bad]  <- folds_bad
+```
+
+W celu znalezienia optymalnego kompromisu pomiędzy doskonałością statystyczną a stabilnością biznesową, testom poddane zostaną trzy alternatywne specyfikacje modeli regresji logistycznej. Każda z nich w unikalny sposób podchodzi do problemu redukcji wymiarowości:
+
+Model Wszystkich Efektów (MWE): zawiera komplet przekształconych zmiennych oraz zdefiniowaną interakcję.
+
+Model Krokowej Wstecznej (MKS): Wykorzystuje automatyczny algorytm eliminacji krokowej oparty na kryterium informacyjnym Akaike (AIC), w celu usunięcia zmiennych statystycznie nieistotnych.
+
+Model Zredukowany Ekspercko (MZR): Podejście hybrydowe, w którym decyzja o usunięciu zmiennej bazowej `oszczednosci_BIN_WOE` (przy jednoczesnym pozostawieniu jej w interakcji) zostaje podjęta na podstawie merytorycznej oceny struktury portfela.
+```{r include=FALSE}
+formuly_modeli <- list(
+  Model_Wszystkie_Efekty = as.formula(
+    paste("klasa ~", paste(c(zmienne_bazowe_woe, interakcja_woe), collapse = " + "))
+  ),
+  Model_Krokowa_Wsteczna = as.formula(
+    paste("klasa ~", paste(c(zmienne_bazowe_woe, interakcja_woe), collapse = " + "))
+  ),
+  Model_Zredukowany_Ekspercko = as.formula(
+    paste("klasa ~", paste(c(setdiff(zmienne_bazowe_woe, "oszczednosci_BIN_WOE"), interakcja_woe), collapse = " + "))
+  )
+)
+
+# Estymacja modeli
+mwe_full <- glm(formuly_modeli$Model_Wszystkie_Efekty, data = dane_cv_proces, family = binomial)
+mks_full <- step(mwe_full, direction = "backward", trace = FALSE)
+mzr_full <- glm(formuly_modeli$Model_Zredukowany_Ekspercko, data = dane_cv_proces, family = binomial)
+```
+
+Sprawdzone zostanie teraz podsumowanie modeli w celu werfikacji znaków parametru Beta.
+```{r echo=FALSE}
+summary(mwe_full)
+summary(mks_full)
+summary(mzr_full)
+```
+
+W żadnym modelu nie pojawiają się ujemne wartości współczynników, więc nie występuje współliniowość, więc można przejść do porównywania modeli.
+
+## Porównanie wynków Gini, AIC i miar pseudo-R2
+Każdy model jest poddawany następującej analizie: dla każdego z 5 kroków algorytm izoluje jeden koszyk jako niezależny zbiór testowy (test_fold), a na pozostałych czterech (train_fold) dokonuje ponownej estymacji parametrów trzech badanych modeli. Kluczowym elementem tego kroku jest monitorowanie współczynnika Gini (wyliczanego na podstawie pola pod krzywą ROC: $Gini = 2 \cdot AUC - 1$). Kalkulacja indeksu Gini zarówno na próbie uczącej, jak i testowej, pozwoli weryfikować zdolności generalizacyjne modeli oraz kontrolować potencjalny spadek mocy dyskryminacyjnej przy zetknięciu z nowymi danymi.
+```{r include=FALSE}
+# macierz na wyniki
+wyniki_cv <- list(
+  MWE_train = numeric(k_folds), MWE_test = numeric(k_folds),
+  MKS_train = numeric(k_folds), MKS_test = numeric(k_folds),
+  MZR_train = numeric(k_folds), MZR_test = numeric(k_folds)
+)
+
+
+# wyznaczanie wyników
+for(i in 1:k_folds) {
+  
+  # Podział na zbiór uczący i walidacyjny w danym kroku pętli
+  train_fold <- dane_cv_proces[dane_cv_proces$fold != i, ]
+  test_fold  <- dane_cv_proces[dane_cv_proces$fold == i, ]
+  
+  mwe <- glm(formuly_modeli$Model_Wszystkie_Efekty, data = train_fold, family = binomial)
+  wyniki_cv$MWE_train[i] <- 2 * pROC::roc(train_fold$klasa, predict(mwe, train_fold, type = "response"), quiet = TRUE)$auc - 1
+  wyniki_cv$MWE_test[i]  <- 2 * pROC::roc(test_fold$klasa,  predict(mwe, test_fold,  type = "response"), quiet = TRUE)$auc - 1
+  
+  mks <- step(mwe, direction = "backward", trace = FALSE)
+  wyniki_cv$MKS_train[i] <- 2 * pROC::roc(train_fold$klasa, predict(mks, train_fold, type = "response"), quiet = TRUE)$auc - 1
+  wyniki_cv$MKS_test[i]  <- 2 * pROC::roc(test_fold$klasa,  predict(mks, test_fold,  type="response"), quiet = TRUE)$auc - 1
+  
+  mzr <- glm(formuly_modeli$Model_Zredukowany_Ekspercko, data = train_fold, family = binomial)
+  wyniki_cv$MZR_train[i] <- 2 * pROC::roc(train_fold$klasa, predict(mzr, train_fold, type = "response"), quiet = TRUE)$auc - 1
+  wyniki_cv$MZR_test[i]  <- 2 * pROC::roc(test_fold$klasa,  predict(mzr, test_fold,  type = "response"), quiet = TRUE)$auc - 1
+}
+```
+
+Sama ocena zdolności dyskryminacyjnych (Gini) nie daje pełnego obrazu dopasowania probabilistycznego modelu regresji logistycznej. W celu pogłębionej analizy jakości dopasowania definiujemy tzw. model zerowy (m_null) zawierający wyłącznie wyraz wolny. Za pomocą funkcji pomocniczych obliczone zostaną dwa wskaźniki typu Pseudo-$R^2$: Coxa-Snella oraz McFaddena . Pozwoli to ocenić, który wariant optymalnie wyjaśnia zmienność binarnej zmiennej losowej przy jednoczesnym kontrolowaniu liczby parametrów strukturalnych.
+```{r include=FALSE}
+# Model pusty (tylko wyraz wolny) do obliczenia wskaźników relatywnych
+m_null <- glm(klasa ~ 1, data = dane_cv_proces, family = binomial)
+n_obs  <- nrow(dane_cv_proces)
+
+# Funkcje pomocnicze liczące czyste wartości bez błędów NA
+licz_cox_snell <- function(model_dopasowany, model_zerowy, n) {
+  L_0 <- as.numeric(logLik(model_zerowy))
+  L_m <- as.numeric(logLik(model_dopasowany))
+  return(1 - exp((2/n) * (L_0 - L_m)))
+}
+
+licz_mcfadden <- function(model_dopasowany, model_zerowy) {
+  L_0 <- as.numeric(logLik(model_zerowy))
+  L_m <- as.numeric(logLik(model_dopasowany))
+  return(1 - (L_m / L_0))
+}
+```
+
+Ostatnim etapem procesu walidacji jest agregacja wszystkich uzyskanych metryk do jednej, czytelnej tabeli porównawczej. Zestawiamy w niej liczbę zmiennych, kryterium informacyjne AIC, wskaźniki Pseudo-$R^2$ oraz uśrednione wyniki Gini z walidacji krzyżowej.Dodatkowo wprowadzamy kluczową z punktu widzenia zarządzania ryzykiem zmienną Gini_Spadek (reprezentującą różnicę między średnim Gini na próbie treningowej a testowej). Minimalny spadek wskaźnika Gini na próbie testowej będzie ostatecznym potwierdzeniem odporności modelu na zjawisko nadmiernego dopasowania i wskaże wariant optymalny do wdrożenia produkcyjnego w systemie scoringowym.
+```{r echo=FALSE}
+tabela_porownawcza <- data.frame(
+  Metoda_Estymacji = c("Metoda: Wszystkie efekty", 
+                       "Metoda: Krokowa wsteczna", 
+                       "Model Zredukowany Ekspercko"),
+  
+  L_Zm = c(length(coef(mwe_full))-1, 
+                        length(coef(mks_full))-1, 
+                        length(coef(mzr_full))-1),
+  
+  AIC = round(c(mwe_full$aic, mks_full$aic, mzr_full$aic), 2),
+  
+  R2_C_S = round(c(licz_cox_snell(mwe_full, m_null, n_obs), 
+                         licz_cox_snell(mks_full, m_null, n_obs), 
+                         licz_cox_snell(mzr_full, m_null, n_obs)), 4),
+  
+  R2_McF  = round(c(licz_mcfadden(mwe_full, m_null), 
+                         licz_mcfadden(mks_full, m_null), 
+                         licz_mcfadden(mzr_full, m_null)), 4),
+  
+  Sr_Gini_U = round(c(mean(wyniki_cv$MWE_train), mean(wyniki_cv$MKS_train), mean(wyniki_cv$MZR_train)), 4),
+  Sr_Gini_T  = round(c(mean(wyniki_cv$MWE_test),  mean(wyniki_cv$MKS_test),  mean(wyniki_cv$MZR_test)), 4)
+)
+
+# Obliczenie spadku mocy (stabilność i kontrola overfittingu)
+tabela_porownawcza$Gini_Spadek <- tabela_porownawcza$Sr_Gini_U - tabela_porownawcza$Sr_Gini_T
+
+# Wyświetlenie ostatecznego zestawienia
+knitr::kable(tabela_porownawcza)
+```
+
+Modele będą oceniane według poniższych kryteriów:
+
+- AIC - im niższe, tym lepsze dopasowanie przy uwzględnieniu liczby parametrów.
+
+- Pseudo-R2 (Cox-Snell, McFadden) - im wyższe, tym lepiej.
+
+- Śr Gini T - najważniejszy z punktu widzenia zdolności predykcyjnej na nowych danych.
+
+- Spadek Gini (TRAIN–TEST) - im mniejszy, tym model bardziej stabilny i mniej podatny na przeuczenie.
+
+Spośród analizowanych modeli najlepsze wyniki uzyskał model zredukowany ekspercko z uwzględnieniem interakcji. Model ten osiągnął najwyższą wartość współczynnika Giniego na zbiorze testowym (0,6137) oraz najmniejszy spadek wartości Giniego pomiędzy zbiorem treningowym i testowym (0,0262), co świadczy o dobrej zdolności generalizacji. Pomimo nieco wyższej wartości AIC niż w modelu krokowym, zapewnia on najlepszy kompromis pomiędzy jakością dopasowania, skutecznością predykcyjną oraz stabilnością.
+
+
+## Testy dyskryminacyjne i kalibracyjne
+W celu dokonania ostatecznej selekcji modelu, tradycyjna ocena oparta na wskaźniku Gini zostaje rozszerzona o zaawansowany zestaw testów dyskryminacyjnych oraz kalibracyjnych. Pierwszym, kluczowym krokiem metodologicznym jest standaryzacja zmiennej objaśnianej oraz transformacja prognoz. Zgodnie z najlepszymi praktykami modelowania ryzyka kredytowego (PD - Probability of Default), odwracamy kodowanie tak, aby wartość 1 reprezentowała zdarzenie negatywne (klienta "złego"). W konsekwencji, prognozy modeli zostają przekształcone z prawdopodobieństwa sukcesu na bezpośrednie prawdopodobieństwo niewypłacalności.
+```{r include=FALSE}
+# Definiujemy 1 jako ZŁY klient
+y_true_zly <- ifelse(as.numeric(as.character(dane_cv_proces$klasa)) == 0, 1, 0)
+
+# Przechodzimy z prawdopodobieństwa "dobry" na prawdopodobieństwo "zły" (PD)
+prob_mwe_bad <- 1 - predict(mwe_full, type = "response")
+prob_mks_bad <- 1 - predict(mks_full, type = "response")
+prob_mzr_bad <- 1 - predict(mzr_full, type = "response")
+```
+
+Test Kołmogorowa-Smirnowa jest jedną z fundamentalnych miar oceny zdolności separacyjnych w modelach skoringowych. Jego celem jest zweryfikowanie, czy rozkłady teoretycznych prawdopodobieństw niewypłacalności (PD) dla klientów dobrych i złych są statystycznie identyczne (hipoteza zerowa). Maksymalna odległość pionowa między dwoma empirycznymi dystrybuantami ($D_{KS}$) wskazuje punkt, w którym model najsilniej rozdziela obie podpopulacje. Pożądany wynik to wysoka wartość statystyki $D_{KS}$ przy poziomie istotności $p-value < 0.05$, co pozwala na odrzucenie $H_0$ i potwierdzenie silnej dyskryminacji.
+```{r warning=FALSE, include=FALSE}
+# Test Kołmogorowa-Smirnowa
+ks_mwe <- ks.test(prob_mwe_bad[y_true_zly == 1], prob_mwe_bad[y_true_zly == 0])
+ks_mks <- ks.test(prob_mks_bad[y_true_zly == 1], prob_mks_bad[y_true_zly == 0])
+ks_mzr <- ks.test(prob_mzr_bad[y_true_zly == 1], prob_mzr_bad[y_true_zly == 0])
+```
+
+Współczynnik Dywergencji ($D$) uzupełnia test KS o informację dotyczącą odległości między średnimi wartościami prognozowanych prawdopodobieństw w grupach klientów rzetelnych i niewypłacalnych, ważoną ich wariancją. Wyższa wartość dywergencji świadczy o tym, że model nie tylko statystycznie różnicuje obie grupy, ale również przypisuje im wyraźnie odseparowane od siebie poziomy ryzyka (rozkłady są "wąskie" wokół swoich średnich i mocno przesunięte względem siebie). Pozwala to na bardziej stabilne zarządzanie portfelem i łatwiejsze wyznaczanie sztywnych punktów odcięcia.
+```{r include=FALSE}
+# Współczynnik dywergencji
+dywergencja <- function(proby_ryzyka, klasy_zly) {
+  p_zli     <- proby_ryzyka[klasy_zly == 1]
+  p_dobrzy  <- proby_ryzyka[klasy_zly == 0]
+  
+  srednia_zli    <- mean(p_zli)
+  srednia_dobrzy <- mean(p_dobrzy)
+  
+  var_zli    <- var(p_zli)
+  var_dobrzy <- var(p_dobrzy)
+  
+  dywergencja <- (srednia_zli - srednia_dobrzy)^2 / sqrt((var_zli + var_dobrzy) / 2)
+  return(dywergencja)
+}
+
+dyw_mwe <- dywergencja(prob_mwe_bad, y_true_zly)
+dyw_mks <- dywergencja(prob_mks_bad, y_true_zly)
+dyw_mzr <- dywergencja(prob_mzr_bad, y_true_zly)
+```
+
+O ile wskaźniki Gini, KS oraz Dywergencja badają zdolność modelu do poprawnego sortowania klientów od najlepszego do najgorszego, o tyle test Hosmera-Lemeshowa weryfikuje jakość kalibracji modelu. Test ten dzieli populację na $g$ grup (zazwyczaj decyli, $g=10$) i porównuje empiryczną (rzeczywistą) liczbę zaobserwowanych bankructw z liczbą oczekiwaną (wynikającą z prognoz PD modelu). W przypadku tego testu, hipoteza zerowa $H_0$ zakłada idealną zgodność (dobrą kalibrację). Z tego względu poszukujemy wartości $p-value > 0.05$, która oznacza brak podstaw do odrzucenia hipotezy o dobrej jakości dopasowania i potwierdza, że model nie niedoszacowuje ani nie przeszacowuje realnego ryzyka.
+```{r include=FALSE}
+# Test Hosmera-Lemeshowa
+hl_mwe <- ResourceSelection::hoslem.test(y_true_zly, prob_mwe_bad, g = 10)
+hl_mks <- ResourceSelection::hoslem.test(y_true_zly, prob_mks_bad, g = 10)
+hl_mzr <- ResourceSelection::hoslem.test(y_true_zly, prob_mzr_bad, g = 10)
+```
+
+Ostatecznym krokiem przed podjęciem decyzji o wyborze modelu jest podsumowanie wyników w zbiorczej tabeli analitycznej.
+```{r echo=FALSE}
+tab_walidacja_all <- data.frame(
+  Statystyka = c("Test KS", 
+                 "Maksymalna odległość KS (D_KS)", 
+                 "Współczynnik Dywergencji", 
+                 "Test Hosmera-Lemeshowa"),
+  
+  Wszystkie_Efekty = c(format.pval(ks_mwe$p.value, digits=4), 
+                       round(as.numeric(ks_mwe$statistic), 4), 
+                       round(dyw_mwe, 4), 
+                       round(hl_mwe$p.value, 4)),
+  
+  Krokowa_Wsteczna = c(format.pval(ks_mks$p.value, digits=4), 
+                       round(as.numeric(ks_mks$statistic), 4), 
+                       round(dyw_mks, 4), 
+                       round(hl_mks$p.value, 4)),
+  
+  Zredukowany_Ekspercko = c(format.pval(ks_mzr$p.value, digits=4), 
+                            round(as.numeric(ks_mzr$statistic), 4), 
+                            round(dyw_mzr, 4), 
+                            round(hl_mzr$p.value, 4))
+)
+
+knitr::kable(tab_walidacja_all)
+```
+
+Test Kołmogorowa–Smirnowa
+
+Dla wszystkich modeli wartość p-value jest znacznie mniejsza od 0,05, co oznacza odrzucenie hipotezy zerowej o identycznych rozkładach wyników dla obu klas. Świadczy to o tym, że każdy z modeli skutecznie rozróżnia obserwacje należące do różnych klas.
+
+Współczynnik dywergencji
+
+Współczynnik dywergencji mierzy stopień separacji pomiędzy rozkładami prawdopodobieństw dla obu klas. Im wyższa jego wartość, tym lepsza zdolność modelu do odróżniania obserwacji dobrych od złych. Najwyższą wartość dywergencji uzyskały modele: wszystkie efekty (0,3474) i zredukowany ekspercko (0,3474). Model krokowy osiągnął nieznacznie niższy wynik (0,3462). Różnice są jednak bardzo małe, dlatego można uznać, że wszystkie trzy modele mają porównywalną zdolność separacji klas.
+
+Test Hosmera–Lemeshowa
+
+Hipoteza zerowa testu Hosmera–Lemeshowa zakłada zgodność pomiędzy wartościami obserwowanymi a wartościami przewidywanymi przez model. Ponieważ dla wszystkich modeli: p-value > 0,05, nie ma podstaw do odrzucenia hipotezy zerowej. Oznacza to, że każdy z modeli jest dobrze skalibrowany i poprawnie odzwierciedla zależność pomiędzy zmiennymi objaśniającymi a prawdopodobieństwem wystąpienia zdarzenia.
+
+**Wniosek**: Analiza testu KS, współczynnika dywergencji oraz testu Hosmera-Lemeshowa wskazuje, że wszystkie trzy modele charakteryzują się bardzo podobną jakością dopasowania. Model krokowy uzyskał nieznacznie najwyższą wartość statystyki KS, natomiast modele pełny i ekspercko zredukowany osiągnęły najwyższą wartość współczynnika dywergencji. Wszystkie modele spełniają również kryterium poprawnej kalibracji według testu Hosmera-Lemeshowa.
+
+W połączeniu z wcześniejszą analizą AIC, pseudo-R2 oraz współczynnika Giniego, najbardziej korzystnym rozwiązaniem pozostaje model zredukowany ekspercko, który zachowuje porównywalne parametry dopasowania, a jednocześnie osiąga najwyższą skuteczność predykcyjną na zbiorze testowym i największą stabilność.
+
+## Wykres przyrostu
+W celu zweryfikowania, o ile razy badane modele są skuteczniejsze w identyfikacji klientów niewypłacalnych w porównaniu do losowego wyboru, niezbędne jest wyznaczenie wskaźnika przyrostu (Lift) i przedstawienie wykresu przyrostów dla badanych trzech modeli.
+```{r include=FALSE}
+# FUnkcja generująca przyrost
+przyrost <- function(prob_bad, nazwa_modelu) {
+  
+  # Budowa ramki danych
+  df <- data.frame(
+    Prob_Bad = prob_bad,
+    Target_Zly = ifelse(as.numeric(as.character(dane_cv_proces$klasa)) == 0, 1, 0)
+  )
+  
+  # Sortujemy malejąco po ryzyku porażki (na górze najgorsi z najwyższym PD)
+  df <- df %>%
+    arrange(desc(Prob_Bad)) %>%
+    mutate(Decyl = ntile(row_number(), 10))
+  
+  wszyscy_zli <- sum(df$Target_Zly == 1)
+  
+  # Przygotowanie tabeli wynikowej
+  df_lift <- data.frame(
+    Procent_Populacji = seq(10, 100, by = 10),
+    Zli = numeric(10),
+    Zli_Skumulowani = numeric(10),
+    Procent_Zlych_Skum = numeric(10),
+    Lift = numeric(10),
+    Model = rep(nazwa_modelu, 10)
+  )
+  
+  # Obliczanie wskaźników Lift na podstawie poprawnej kolejności ryzyka
+  for(i in 1:10) {
+    df_lift$Zli[i] <- sum(df$Target_Zly[df$Decyl == i] == 1)
+    df_lift$Zli_Skumulowani[i] <- sum(df_lift$Zli[1:i])
+    
+    df_lift$Procent_Zlych_Skum[i] <- (df_lift$Zli_Skumulowani[i] / wszyscy_zli) * 100
+    df_lift$Lift[i] <- df_lift$Procent_Zlych_Skum[i] / df_lift$Procent_Populacji[i]
+  }
+  
+  return(df_lift)
+}
+
+# Generowanie danych dla modeli
+df_mwe_lift <- przyrost(prob_mwe_bad, "Wszystkie efekty")
+df_mks_lift <- przyrost(prob_mks_bad, "Krokowa wsteczna")
+df_mzr_lift <- przyrost(prob_mzr_bad, "Zredukowany ekspercko")
+
+# Łączymy wyniki trzech modeli w jedną strukturę
+df_lift_all <- rbind(df_mwe_lift, df_mks_lift, df_mzr_lift)
+```
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+# Wykres porównawczy przyrostów
+ggplot(df_lift_all, aes(x = Procent_Populacji, y = Lift, color = Model, group = Model)) +
+  geom_line(size = 1.2) +
+  geom_point(size = 2.5) +
+  geom_hline(yintercept = 1, linetype = "dashed", color = "gray40", size = 0.8) +
+  labs(
+    title = "Porównanie Wykresów Przyrostu (Lift Chart) dla badanych modeli",
+    subtitle = "Zdolność poszczególnych podejść do identyfikacji klientów z grupy ryzyka (Złych)",
+    x = "Skumulowany procent populacji (od najwyższego ryzyka)",
+    y = "Wskaźnik przyrostu (Lift)"
+  ) +
+  scale_x_continuous(breaks = seq(10, 100, by = 10), labels = paste0(seq(10, 100, by = 10), "%")) +
+  scale_color_manual(values = c("Wszystkie efekty" = "darkred", 
+                                "Krokowa wsteczna" = "darkblue", 
+                                "Zredukowany ekspercko" = "darkgreen")) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(face = "bold", size = 14),
+    axis.title = element_text(face = "bold"),
+    legend.position = "bottom",
+    panel.grid.minor = element_blank()
+  )
+```
+
+Wykres przyrostu (Lift Chart) porównuje zdolność trzech wariantów modelu scoringowego: „Krokowa wsteczna”, „Wszystkie efekty” oraz „Zredukowany ekspercko” do identyfikacji klientów z grupy wysokiego ryzyka („Złych”). Oś pozioma przedstawia skumulowany procent populacji uporządkowany od najwyższego ryzyka, natomiast oś pionowa reprezentuje wskaźnik przyrostu (Lift), który obrazuje, o ile razy badane modele są skuteczniejsze w wykrywaniu złych klientów w porównaniu do wyboru losowego (oznaczonego przerywaną linią na poziomie 1.0). Krzywe wszystkich trzech modeli niemal całkowicie się pokrywają na całej długości wykresu, co dowodzi ich bardzo zbliżonej i wysokiej efektywności; w pierwszym decylu (10% populacji o najwyższym ryzyku) modele osiągają najwyższą skuteczność ze wskaźnikiem Lift na poziomie około 2.45-2.50, po czym stabilnie opadają, osiągając wartość 1.0 przy objęciu analizą 100% populacji.
+
+## Wykres KS
+```{r include=FALSE}
+ks <- function(wybrany_model, kod_modelu){
+
+  ladna_nazwa <- dplyr::case_when(
+    kod_modelu == "mwe_full" ~ "Wszystkie efekty",
+    kod_modelu == "mks_full" ~ "Krokowa wsteczna",
+    kod_modelu == "mzr_full" ~ "Zredukowany ekspercko",
+    TRUE ~ "Model"
+  )
+
+  dane_cv_proces$pred_pd <- predict(wybrany_model, type = "response")
+
+  dane_cv_proces$score_ryzyka <- 1 - dane_cv_proces$pred_pd
+
+  dane_cv_proces$target_zly <- ifelse(
+    as.numeric(as.character(dane_cv_proces$klasa)) == 0,
+    1,
+    0
+  )
+
+  pred_obj <- ROCR::prediction(
+    dane_cv_proces$score_ryzyka,
+    dane_cv_proces$target_zly
+  )
+
+  perf <- ROCR::performance(pred_obj, "tpr", "fpr")
+
+  df_ks <- data.frame(
+    Cutoff = unlist(perf@alpha.values),
+    FPR = unlist(perf@x.values),
+    TPR = unlist(perf@y.values)
+  ) %>%
+    dplyr::filter(is.finite(Cutoff)) %>%
+    dplyr::mutate(Diff = abs(TPR - FPR))
+
+  max_ks <- df_ks[which.max(df_ks$Diff), ]
+
+  ks_x_pos <- max_ks$Cutoff[1]
+  ks_y_pos <- (max_ks$FPR[1] + max_ks$TPR[1]) / 2
+
+  ks_val_txt <- paste0(
+    "Max KS = ", round(max_ks$Diff[1], 4),
+    "\nCut-off = ", round(max_ks$Cutoff[1], 4)
+  )
+
+  p <- ggplot(df_ks, aes(x = Cutoff)) +
+    geom_line(aes(y = TPR, color = "Dystrybuanta - Klienci źli"), linewidth = 1.2) +
+    geom_line(aes(y = FPR, color = "Dystrybuanta - Klienci dobrzy"), linewidth = 1.2) +
+
+    geom_segment(
+      aes(
+        x = max_ks$Cutoff[1],
+        y = max_ks$FPR[1],
+        xend = max_ks$Cutoff[1],
+        yend = max_ks$TPR[1]
+      ),
+      color = "purple",
+      linewidth = 1.1
+    ) +
+
+    geom_point(
+      aes(x = max_ks$Cutoff[1], y = max_ks$TPR[1]),
+      color = "purple",
+      size = 3
+    ) +
+
+    geom_point(
+      aes(x = max_ks$Cutoff[1], y = max_ks$FPR[1]),
+      color = "purple",
+      size = 3
+    ) +
+
+    annotate(
+      "label",
+      x = ks_x_pos + 0.03,
+      y = ks_y_pos,
+      label = ks_val_txt,
+      color = "purple",
+      fontface = "bold"
+    ) +
+
+    scale_color_manual(values = c(
+      "Dystrybuanta - Klienci źli" = "#e74c3c",
+      "Dystrybuanta - Klienci dobrzy" = "#2ecc71"
+    )) +
+
+    labs(
+      title = paste("Wykres KS -", ladna_nazwa),
+      subtitle = "Weryfikacja maksymalnej separacji rozkładów klientów dobrych i złych",
+      x = "Punkt odcięcia (PD)",
+      y = "Prawdopodobieństwo skumulowane"
+    ) +
+
+    xlim(0, 1) +
+    theme_minimal() +
+    theme(
+    plot.title = element_text(face = "bold", size = 13),
+    legend.position = "bottom",
+    legend.title = element_blank()
+  )
+
+  print(p)
+}
+```
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+ks(mwe_full, "mwe_full")
+ks(mks_full, "mks_full")
+ks(mzr_full, "mzr_full")
+```
+
+Wszystkie trzy modele prezentują bardzo zbliżoną i stabilną siłę dyskryminacyjną. Wartość statystyki KS oscyluje wokół poziomu 0.50, co w warunkach modelowania ryzyka kredytowego oznacza dobrą separację pomiędzy klientami „dobrymi” a „złymi”.Najlepszy model pod kątem KS to model krokowa wsteczna, który osiąga najwyższą wartość separacji ($Max\ KS = 0.5067$). Różnica względem pozostałych modeli jest jednak minimalna (wynosi ok. 0.003-0.004).Optymalny punkt odcięcia (miejsce, w którym odległość między dystrybuantami jest największa) jest niemal identyczny dla każdego podejścia i wynosi około 0.28-0.29. Oznacza to, że niezależnie od metody redukcji zmiennych, struktura oceny ryzyka pozostaje spójna.
+
+## Wykres zysków
+```{r include=FALSE}
+wykres_gain <- function(wybrany_model, kod_modelu){
+
+  ladna_nazwa <- dplyr::case_when(
+    kod_modelu == "mwe_full" ~ "Wszystkie efekty",
+    kod_modelu == "mks_full" ~ "Krokowa wsteczna",
+    kod_modelu == "mzr_full" ~ "Zredukowany ekspercko",
+    TRUE ~ "Model"
+  )
+
+  dane_cv_proces$pred_pd <- predict(wybrany_model, type = "response")
+
+  df_gain <- dane_cv_proces %>%
+    dplyr::arrange(pred_pd) %>%
+    dplyr::mutate(decyl = dplyr::ntile(pred_pd, 10)) %>%
+    dplyr::group_by(decyl) %>%
+    dplyr::summarise(
+      liczba_klientow = n(),
+      liczba_zlych = sum(as.numeric(as.character(klasa)) == 0),
+      .groups = "drop"
+    ) %>%
+    dplyr::arrange(decyl) %>%
+    dplyr::mutate(
+      procent_populacji = decyl * 10,
+      skumulowani_zli = cumsum(liczba_zlych),
+      procent_zlych_skum = (skumulowani_zli / sum(liczba_zlych)) * 100,
+      losowo = procent_populacji
+    )
+
+  punkt_startowy <- data.frame(
+    decyl = 0,
+    liczba_klientow = 0,
+    liczba_zlych = 0,
+    procent_populacji = 0,
+    skumulowani_zli = 0,
+    procent_zlych_skum = 0,
+    losowo = 0
+  )
+
+  df_gain_plot <- rbind(punkt_startowy, df_gain)
+
+  p <- ggplot(df_gain_plot, aes(x = procent_populacji)) +
+    geom_line(aes(y = procent_zlych_skum, color = "Model Scoringowy"), linewidth = 1.3) +
+    geom_point(aes(y = procent_zlych_skum, color = "Model Scoringowy"), size = 3) +
+    geom_line(aes(y = losowo, color = "Model Losowy (brak modelu)"),
+              linetype = "dashed", linewidth = 1) +
+
+    labs(
+      title = paste("Skumulowany Wykres Zysku (Gain Chart) -", ladna_nazwa),
+      subtitle = "Skumulowane wykrycie klientów złych",
+      x = "Skumulowany procent populacji",
+      y = "Skumulowany procent wykrytych złych klientów"
+    ) +
+
+    scale_x_continuous(breaks = seq(0, 100, 10), labels = paste0(seq(0, 100, 10), "%")) +
+    scale_y_continuous(breaks = seq(0, 100, 10), labels = paste0(seq(0, 100, 10), "%")) +
+
+    scale_color_manual(values = c(
+      "Model Scoringowy" = "#2ecc71",
+      "Model Losowy (brak modelu)" = "#7f8c8d"
+    )) +
+
+    theme_minimal() +
+    theme(
+      plot.title = element_text(face = "bold"),
+      legend.position = "bottom",
+      legend.title = element_blank()
+    )
+
+  print(p)
+}
+```
+
+```{r echo=FALSE}
+wykres_gain(mwe_full, "mwe_full")
+wykres_gain(mks_full, "mks_full")
+wykres_gain(mzr_full, "mzr_full")
+```
+
+Podobnie jak w przypadku wcześniej analizowanych wykresów KS, modele wykazują niemal identyczną zdolność selekcji. Wizualny przebieg zielonych linii modeli scoringowych na każdym wykresie pokrywa się niemal w 100%. Wszystkie warianty modelu radzą sobie znacznie lepiej niż model losowy (szara, przerywana linia przekątnej). Przykładowo, wybierając zaledwie 30% populacji o najwyższym ryzyku, jesteśmy w stanie wykryć aż około 62% wszystkich złych klientów. Z kolei w połowie populacji (50%) mieści się już ok. 83% wszystkich domniemanych bankructw/defaultów.
+
+**Wniosek**: Ponieważ profile zysku są identyczne, najrozsądniejszym wyborem pozostaje `Model Zredukowany Ekspercko`. Daje on dokładnie taki sam procent wykrycia złych klientów w każdym decylu przy jednoczesnym zachowaniu prostoty interpretacyjnej i logicznej, zatem wykorzystany zostanie do dalszej analizy.
+
+
+# Liczenie punktów scoringowych
+
+Punkty scoringowe wyznaczono na podstawie końcowego modelu wybranego w poprzedniej części pracy, czyli modelu zredukowanego ekspercko z interakcją `czas_trwania_BINxoszczednosci_BIN`. Zastosowano klasyczne skalowanie scorecard zgodne z funkcją `scorecard()` z pakietu `scorecard`: punkt bazowy `points0 = 600`, iloraz szans `odds0 = 1/19` oraz `pdo = 50`, czyli wzrost wyniku o 50 punktów odpowiada podwojeniu ilorazu szans.
+
+Ponieważ model został zbudowany dla zmiennej `klasa`, gdzie `1` oznacza dobrego klienta, a `0` złego klienta, wyższa liczba punktów oznacza większe prawdopodobieństwo przynależności do grupy dobrych kredytobiorców, czyli niższe ryzyko kredytowe.
+
+```{r include=FALSE}
+# Parametry skalowania zgodne z domyślnym podejściem pakietu scorecard:
+points0 <- 600
+odds0   <- 1/19
+pdo     <- 50
+
+factor <- pdo / log(2)
+offset <- points0 - factor * log(odds0)
+
+# Model końcowy wybrany w projekcie:
+model_scoring <- mzr_full
+
+# Współczynniki modelu logistycznego
+wsp <- coef(model_scoring)
+
+# Wyraz bazowy scorecardu
+basepoints <- offset + factor * wsp["(Intercept)"]
+basepoints
+```
+
+Wartością bazową karty scoringowej jest wyraz wolny modelu, czyli intercept. W analizowanym modelu jego dokładna wartość punktowa wynosi `r basepoints`, co po zaokrągleniu daje 875 punktów. Oznacza to, że każda obserwacja rozpoczyna obliczanie wyniku scoringowego od wartości bazowej równej 875, a następnie do tej wartości dodawane są punkty wynikające z przynależności klienta do odpowiednich kategorii poszczególnych zmiennych.
+
+Dla każdego przedziału zmiennej obliczono liczbę punktów według zależności:
+
+$$\text{punkty}_{j,k} = \text{factor} \cdot \beta_j \cdot WOE_{j,k},$$
+
+gdzie $\beta_j$ oznacza współczynnik regresji logistycznej dla danej zmiennej WOE, a $WOE_{j,k}$ wartość WOE dla konkretnej kategorii tej zmiennej. Całkowity wynik klienta jest sumą punktów bazowych i punktów uzyskanych za wszystkie jego kategorie.
+
+W tabeli przedstawiono liczbę punktów przypisaną poszczególnym kategoriom zmiennych wykorzystanych w modelu końcowym. Wartość dodatnia zwiększa końcowy wynik scoringowy klienta, natomiast wartość ujemna go obniża. Wyraz wolny modelu, oznaczony jako (Intercept), stanowi wartość bazową karty scoringowej.
+
+```{r include=FALSE}
+# Funkcja do utworzenia tabeli WOE dla danej zmiennej dyskretnej
+woe_tabela <- function(data, var) {
+  data %>%
+    group_by(.data[[var]]) %>%
+    summarise(
+      liczba_obserwacji = n(),
+      liczba_dobrych = sum(klasa == 1),
+      liczba_zlych = sum(klasa == 0),
+      .groups = "drop"
+    ) %>%
+    mutate(
+      proc_dobrych = liczba_dobrych / sum(liczba_dobrych),
+      proc_zlych = liczba_zlych / sum(liczba_zlych),
+      WOE = log(proc_dobrych / proc_zlych) * 100,
+      zmienna = var
+    ) %>%
+    rename(kategoria = all_of(var)) %>%
+    select(zmienna, kategoria, liczba_obserwacji, liczba_dobrych,
+           liczba_zlych, proc_dobrych, proc_zlych, WOE)
+}
+
+# Zmienne użyte w modelu końcowym, bez wyrazu wolnego
+zmienne_modelu <- names(wsp)[names(wsp) != "(Intercept)"]
+
+# Nazwy zmiennych dyskretnych, z których pochodzą kolumny WOE
+zmienne_bin_modelu <- gsub("_WOE$", "", zmienne_modelu)
+
+# Tabela WOE tylko dla zmiennych występujących w modelu końcowym
+tabela_woe_model <- purrr::map_dfr(zmienne_bin_modelu, ~woe_tabela(dane_dys, .x))
+
+# Tabela punktowa
+base_row <- data.frame(
+  zmienna = "basepoints",
+  kategoria = "",
+  WOE = NA_real_,
+  beta = NA_real_,
+  punkty_dokladne = as.numeric(basepoints),
+  punkty = round(as.numeric(basepoints))
+)
+
+tabela_punktowa <- purrr::map_dfr(zmienne_modelu, function(zmienna_woe) {
+  zmienna_bin <- gsub("_WOE$", "", zmienna_woe)
+  beta <- wsp[zmienna_woe]
+  tabela_woe_model %>%
+    filter(zmienna == zmienna_bin) %>%
+    mutate(
+      beta = as.numeric(beta),
+      punkty_dokladne = factor * beta * WOE,
+      punkty = round(punkty_dokladne)
+    ) %>%
+    select(zmienna, kategoria, WOE, beta, punkty_dokladne, punkty)
+})
+
+tabela_punktowa <- bind_rows(base_row, tabela_punktowa)
+
+tabela_punktowa
+```
+
+```{r echo = FALSE}
+tabela_punktowa_do_druku <- tabela_punktowa %>%
+  mutate(
+    zmienna = as.character(zmienna),
+    kategoria = as.character(kategoria),
+    
+    # skrócenie nazw zmiennych do raportu
+    zmienna = gsub("_BIN", "", zmienna),
+    zmienna = gsub("x", " × ", zmienna),
+    
+    punkty_dokladne = round(as.numeric(punkty_dokladne), 2),
+    punkty = round(as.numeric(punkty), 0)
+  ) %>%
+  select(
+    zmienna,
+    kategoria,
+    punkty_dokladne,
+    punkty
+  )
+
+knitr::kable(
+  tabela_punktowa_do_druku,
+  caption = "Tabela punktowa dla kategorii zmiennych wykorzystanych w modelu końcowym",
+  col.names = c(
+    "Zmienna",
+    "Kategoria",
+    "Punkty dokładne",
+    "Punkty"
+  ),
+  digits = 2
+)
+```
+
+
+## Wartości IV dla zmiennych po dyskretyzacji
+```{r echo=FALSE}
+iv_values <- iv_wyniki %>%
+  select(variable, info_value) %>%
+  arrange(info_value) %>%
+  mutate(
+    variable = factor(variable, levels = variable),
+    grupa_iv = ifelse(info_value < 0.1, "IV < 0,10", "IV >= 0,10")
+  )
+
+
+
+knitr::kable(
+  iv_values,
+  caption = "Wartości IV dla zmiennych po dyskretyzacji",
+  col.names = c("Zmienna", "IV", "grupa IV"),
+  digits = 4
+)
+```
+
+W celu dodatkowej oceny zmiennych obecnych w modelu końcowym przedstawiono ich wartości Information Value. Wartość IV pozwala określić siłę dyskryminacyjną zmiennej, czyli jej zdolność do rozróżniania dobrych i złych kredytobiorców. Zmienne o wartości IV poniżej 0,10 uznaje się zwykle za słabsze predykcyjnie, natomiast wartości powyżej 0,10 wskazują na co najmniej umiarkowaną przydatność informacyjną.
+
+## Wykres IV tylko dla zmiennych z modelu końcowego
+Na wykresie przedstawiono wyłącznie zmienne wykorzystane w modelu końcowym, co pozwala ocenić, czy ostatecznie wybrany zestaw predyktorów opiera się na zmiennych posiadających istotną wartość informacyjną.
+
+```{r echo=FALSE}
+zmienne_modelu_bin <- names(coef(mzr_full))[-1] %>%
+  gsub("_WOE$", "", .)
+
+iv_values_model <- iv_wyniki %>%
+  filter(variable %in% zmienne_modelu_bin) %>%
+  select(variable, info_value) %>%
+  arrange(info_value) %>%
+  mutate(
+    variable = factor(variable, levels = variable),
+    grupa_iv = ifelse(info_value < 0.1, "IV < 0,10", "IV >= 0,10")
+  )
+
+ggplot(iv_values_model, aes(x = variable, y = info_value)) +
+  geom_col(aes(fill = grupa_iv)) +
+  coord_flip() +
+  
+  geom_text(
+    aes(label = round(info_value, 3), color = grupa_iv),
+    hjust = -0.1,
+    size = 4,
+    show.legend = FALSE
+  ) +
+  
+  scale_fill_manual(
+    values = c(
+      "IV < 0,10" = "grey60",
+      "IV >= 0,10" = "#377eb8"
+    )
+  ) +
+  
+  scale_color_manual(
+    values = c(
+      "IV < 0,10" = "grey40",
+      "IV >= 0,10" = "#377eb8"
+    )
+  ) +
+  
+  scale_y_continuous(
+    expand = expansion(mult = c(0, 0.08))
+  ) +
+  
+  labs(
+    title = "Wartość informacyjna IV dla zmiennych wykorzystanych w modelu końcowym",
+    x = NULL,
+    y = "Information Value (IV)",
+    fill = NULL
+  ) +
+  
+  theme_minimal() +
+  theme(
+    panel.grid.major.y = element_blank(),
+    legend.position = "none",
+    plot.margin = unit(c(1, 1, 1, 1), "cm")
+  )
+```
+
+Wszystkie zmienne uwzględnione w modelu osiągają wartości IV większe od 0,02, co oznacza, że zmienne te mają wartość predykcyjną. Sześć pierwszych zmiennych przedstawionych na wykresie powyżej wykazuje się umiarkowaną przydatność informacyjną. Natomiast pozostałe wykazują się słabszą, ale nadal akceptowalną, przydatnością.
+
+## Wyznaczenie punktów scoringowych
+
+Następnie przyznano punkty każdemu kredytobiorcy - do punktów bazowych dodano punkty odpowiadające kategoriom zmiennych, do których należał dany klient. Wynik `score_dokladny` jest dokładna liczbą punktów wyznaczonych dla poszczególnych kredytobiorców, natomiast wynik `score` jest zaokrąglonągleniem tej wartości. Im wyższa wartość `score`, tym większa przewidywana wiarygodność kredytowa klienta i tym niższe ryzyko niespłacenia zobowiązania.
+
+
+Dla każdego kredytobiorcy obliczono również prawdopodobieństwo przynależności do grupy dobrych klientów (`P_good`) oraz prawdopodobieństwo przynależności do grupy złych klientów (`PD_bad`). 
+
+W poniższej tabeli zostały przedstawione podstawowe statystyki opisowe dla otrzymanych wyników oraz 6 przykładowych obserwacji.
+
+```{r include=FALSE}
+# Funkcja nadająca punkty dla jednej zmiennej
+nadaj_punkty <- function(data_bin, tabela_pkt, zmienna_bin) {
+  mapa <- tabela_pkt %>%
+    filter(zmienna == zmienna_bin) %>%
+    select(kategoria, punkty_dokladne)
+
+  data_bin %>%
+    select(all_of(zmienna_bin)) %>%
+    left_join(mapa, by = setNames("kategoria", zmienna_bin)) %>%
+    pull(punkty_dokladne)
+}
+
+scoring_klientow <- dane_dys %>% select(klasa)
+scoring_klientow$P_good <- predict(model_scoring, type = "response")
+scoring_klientow$PD_bad <- 1 - scoring_klientow$P_good
+scoring_klientow$score_dokladny <- as.numeric(basepoints)
+
+for (v in zmienne_bin_modelu) {
+  scoring_klientow[[paste0("pkt_", v)]] <- nadaj_punkty(dane_dys, tabela_punktowa, v)
+  scoring_klientow$score_dokladny <- scoring_klientow$score_dokladny + scoring_klientow[[paste0("pkt_", v)]]
+}
+
+scoring_klientow$score <- round(scoring_klientow$score_dokladny)
+scoring_klientow$klasa_opis <- ifelse(scoring_klientow$klasa == 1, "dobry", "zły")
+
+
+summary(scoring_klientow$score)
+head(scoring_klientow %>% select(klasa_opis, P_good, PD_bad, score_dokladny, score), 6)
+```
+
+```{r echo=FALSE}
+statystyki_score <- scoring_klientow %>%
+  summarise(
+    Minimum = min(score, na.rm = TRUE),
+    `I kwartyl` = quantile(score, 0.25, na.rm = TRUE),
+    Mediana = median(score, na.rm = TRUE),
+    Średnia = mean(score, na.rm = TRUE),
+    `III kwartyl` = quantile(score, 0.75, na.rm = TRUE),
+    Maksimum = max(score, na.rm = TRUE)
+  )
+
+knitr::kable(
+  statystyki_score,
+  caption = "Podstawowe statystyki punktów scoringowych",
+  digits = 2
+)
+```
+
+Uzyskane wartości punktowe mieszczą się w przedziale od 635 do 1156 punktów. Mediana wyniku scoringowego wynosi 898 punktów, a średnia jest równa około 898,1 punktu. Oznacza to, że rozkład punktów jest względnie wyśrodkowany wokół wartości 900 punktów. 
+
+```{r echo=FALSE}
+# Pierwsze obserwacje z prawdopodobieństwami i wynikiem scoringowym
+pierwsze_obserwacje_score <- scoring_klientow %>%
+  select(
+    klasa_opis,
+    P_good,
+    P_bad = PD_bad,
+    score_dokladny,
+    score
+  ) %>%
+  head(6) %>%
+  mutate(
+    P_good = round(P_good, 3),
+    P_bad = round(P_bad, 3),
+    score_dokladny = round(score_dokladny, 2),
+    score = round(score, 0)
+  )
+
+knitr::kable(
+  pierwsze_obserwacje_score,
+  caption = "Pierwsze obserwacje z wyznaczonym prawdopodobieństwem i punktacją scoringową",
+  digits = 2
+)
+```
+
+Przedstawione pierwsze obserwacje pokazują, że wyższym wartościom prawdopodobieństwa przynależności do grupy dobrych kredytobiorców odpowiadają wyższe wartości `score`, natomiast większe prawdopodobieństwo przynależności do grupy złych kredytobiorców wiąże się z niższą końcową punktacją klienta.
+
+W celu pokazania sposobu wyznaczania końcowego wyniku scoringowego przedstawiono przykład dla dwóch pierwszych obserwacji ze zbioru danych. Pierwsza obserwacja dotyczy klienta dobrego, natomiast druga klienta złego. Dla każdego kredytobiorcy końcowy wynik punktowy powstaje jako suma wartości bazowej równej 875 punktów oraz punktów przypisanych kategoriom zmiennych, do których należy dany klient.
+
+```{r echo=FALSE}
+# Przykład wyznaczania punktów dla dwóch pierwszych klientów
+przyklad_punktow <- scoring_klientow %>%
+  select(
+    klasa_opis,
+    score_dokladny,
+    score,
+    starts_with("pkt_")
+  ) %>%
+  slice(1:2)
+
+# Zmiana układu tabeli z szerokiego na długi
+przyklad_punktow_dlugi <- przyklad_punktow %>%
+  mutate(nr_klienta = row_number()) %>%
+  pivot_longer(
+    cols = starts_with("pkt_"),
+    names_to = "zmienna",
+    values_to = "punkty"
+  ) %>%
+  mutate(
+    zmienna = gsub("^pkt_", "", zmienna),
+    zmienna = gsub("_BIN", "", zmienna),
+    zmienna = gsub("x", " × ", zmienna),
+    punkty = round(punkty, 2),
+    klient = paste0("Klient ", nr_klienta, " — ", klasa_opis)
+  ) %>%
+  select(
+    klient,
+    zmienna,
+    punkty
+  )
+
+knitr::kable(
+  przyklad_punktow_dlugi,
+  caption = "Punkty cząstkowe dla dwóch przykładowych kredytobiorców",
+  col.names = c("Klient", "Zmienna", "Punkty"),
+  digits = 2
+)
+```
+
+Dla pierwszego klienta, należącego do grupy dobrych kredytobiorców, wynik punktowy obliczono następująco:
+$$Score_1 = 875 + 17{,}78 + 31{,}39 - 46{,}30 + 37{,}65 + 3{,}29 + 7{,}02 + 14{,}81 - 21{,}27 + 9{,}88 + 6{,}52 + 5{,}77 + 62{,}12 = 1003{,}64.$$
+Po zaokrągleniu klient otrzymał 1004 punkty.
+
+Dla drugiego klienta, należącego do grupy złych kredytobiorców, wynik punktowy wyniósł:
+$$Score_2 = 875 - 21{,}87 + 31{,}39 - 15{,}00 - 4{,}53 - 4{,}20 - 13{,}06 - 1{,}59 + 20{,}55 + 9{,}88 + 6{,}52 + 5{,}77 - 66{,}50 = 822{,}34.$$
+
+Po zaokrągleniu klient otrzymał 822 punkty.
+
+Przykład pokazuje, że klient dobry uzyskał wyraźnie wyższy wynik scoringowy niż klient zły. Wynika to przede wszystkim z korzystniejszych kategorii zmiennych, które zwiększyły jego końcową punktację. W przypadku drugiego klienta część kategorii miała ujemny wkład do wyniku, przez co jego score był znacznie niższy. Jest to zgodne z interpretacją modelu scoringowego, zgodnie z którą wyższa liczba punktów oznacza niższe przewidywane ryzyko kredytowe.
+
+
+## Statystyki punktów scoringowych według grupy klienta
+```{r echo=FALSE}
+scoring_klientow <- scoring_klientow %>%
+  mutate(
+    klasa_opis = case_when(
+      klasa == 0 ~ "zły klient",
+      klasa == 1 ~ "dobry klient"
+    )
+  )
+
+statystyki_score_grupa <- scoring_klientow %>%
+  group_by(klasa_opis) %>%
+  summarise(
+    minimum = min(score, na.rm = TRUE),
+    maksimum = max(score, na.rm = TRUE),
+    mediana = median(score, na.rm = TRUE),
+    srednia = mean(score, na.rm = TRUE),
+    liczba_obserwacji = n(),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    across(
+      where(is.numeric),
+      ~ round(.x, 0)
+    )
+  )
+
+statystyki_score_grupa %>%
+  knitr::kable(
+    caption = "Punkty scoringowe według grupy klientów"
+  )
+```
+
+Tabela przedstawia podstawowe statystyki punktów scoringowych osobno dla dobrych i złych klientów. W grupie dobrych klientów średnia liczba punktów wynosi 932, a mediana 939. Dla złych klientów wartości te są wyraźnie niższe i wynoszą odpowiednio 818 oraz 815. Oznacza to, że model przypisuje większą liczbę punktów klientom o niższym ryzyku kredytowym.
+
+Różnica między średnimi wynikami obu grup wynosi 114 punktów, co wskazuje na widoczne przesunięcie rozkładu punktów w stronę wyższych wartości dla dobrych kredytobiorców. Zakres punktów w obu grupach częściowo się jednak pokrywa: dobrzy klienci uzyskują od 655 do 1156 punktów, natomiast źli od 635 do 1083 punktów. Oznacza to, że model dobrze różnicuje grupy na poziomie ogólnym, ale nie zapewnia pełnego rozdzielenia dobrych i złych klientów.
+
+Z tego względu konieczne jest wyznaczenie punktu odcięcia, który pozwoli podjąć decyzję, od jakiej liczby punktów klient zostanie zaklasyfikowany jako akceptowany.
+
+Dodatkowo przygotowano podział klientów na decyle według wyniku scoringowego. Pierwszy decyl zawiera klientów o najniższej punktacji, czyli o najwyższym ryzyku kredytowym.
+
+```{r echo=FALSE}
+# Podział klientów na decyle według wyniku scoringowego
+decyle_score <- scoring_klientow %>%
+  arrange(score) %>%
+  mutate(decyl_ryzyka = ntile(score, 10)) %>%
+  group_by(decyl_ryzyka) %>%
+  summarise(
+    score_min = min(score, na.rm = TRUE),
+    score_max = max(score, na.rm = TRUE),
+    liczba = n(),
+    liczba_zlych = sum(klasa_opis == "zły klient"),
+    liczba_dobrych = sum(klasa_opis == "dobry klient"),
+    bad_rate = liczba_zlych / liczba,
+    .groups = "drop"
+  )
+
+decyle_score_do_druku <- decyle_score %>%
+  mutate(
+    bad_rate = round(bad_rate, 2),
+  )
+
+knitr::kable(
+  decyle_score_do_druku,
+  caption = "Podział klientów na decyle według wyniku scoringowego",
+  col.names = c(
+    "Decyl",
+    "Score min",
+    "Score max",
+    "Liczba klientów",
+    "Liczba złych",
+    "Liczba dobrych",
+    "Bad rate"
+  ),
+  digits = 3
+)
+```
+
+Wyniki przedstawione w tabeli potwierdzają poprawne działanie modelu scoringowego. W pierwszym decylu, obejmującym klientów z najniższą liczbą punktów, udział złych kredytobiorców wynosi 73%. W kolejnych decylach wartość ta systematycznie maleje, osiągając 3% w dziesiątym decylu, czyli w grupie klientów z najwyższą punktacją. Oznacza to, że model prawidłowo porządkuje klientów według poziomu ryzyka kredytowego: osoby z niższym score częściej należą do grupy złych klientów, natomiast osoby z wyższym score częściej są dobrymi kredytobiorcami.
+
+
+## Rozkład punktów scoringowych według grupy klienta
+
+W celu porównania wyników scoringowych w grupie dobrych i złych kredytobiorców obliczono średnią liczbę punktów w każdej z grup. Pozwala to sprawdzić, czy model przypisuje wyższe wyniki klientom rzeczywiście należącym do grupy dobrych kredytobiorców.
+
+```{r echo=FALSE}
+# Jeżeli kolumna klasa_opis jeszcze nie została utworzona:
+scoring_klientow <- scoring_klientow %>%
+  mutate(
+    klasa_opis = ifelse(klasa == 1, "dobry klient", "zły klient")
+  )
+
+# Średni wynik scoringowy w każdej grupie klientów
+mean_score <- scoring_klientow %>%
+  group_by(klasa_opis) %>%
+  summarise(
+    sredni_score = mean(score, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    sredni_score = round(sredni_score, 2)
+  )
+
+knitr::kable(
+  mean_score,
+  caption = "Średni wynik scoringowy według grupy klienta",
+  col.names = c("Grupa klienta", "Średni score"),
+  digits = 2
+)
+```
+
+Średni wynik scoringowy jest wyższy w grupie dobrych klientów niż w grupie złych klientów. Oznacza to, że model przypisuje większą liczbę punktów osobom o niższym ryzyku kredytowym. Jest to zgodne z założeniem modelu scoringowego, zgodnie z którym wyższy wynik punktowy oznacza większe prawdopodobieństwo przynależności do grupy dobrych kredytobiorców.
+
+Ostatnim elementem oceny punktacji scoringowej jest porównanie rozkładów wyników dla dobrych i złych klientów. Wykres gęstości pozwala wizualnie sprawdzić, czy rozkłady obu grup są od siebie przesunięte. 
+
+```{r echo=FALSE}
+ggplot(scoring_klientow, aes(x = score, color = klasa_opis, fill = klasa_opis)) +
+  geom_density(alpha = 0.3, linewidth = 1) +
+  
+  geom_vline(
+    data = mean_score,
+    aes(xintercept = sredni_score, color = klasa_opis),
+    linetype = "dashed",
+    linewidth = 0.8
+  ) +
+  
+  geom_text(
+    data = mean_score,
+    aes(
+      x = sredni_score,
+      y = Inf,
+      label = round(sredni_score, 0),
+      color = klasa_opis
+    ),
+    vjust = 1.5,
+    size = 4,
+    show.legend = FALSE
+  ) +
+  
+  scale_color_manual(
+    values = c(
+      "zły klient" = "red",
+      "dobry klient" = "blue"
+    )
+  ) +
+  
+  scale_fill_manual(
+    values = c(
+      "zły klient" = "red",
+      "dobry klient" = "blue"
+    )
+  ) +
+  
+  theme_minimal() +
+  theme(
+    legend.title = element_blank(),
+    legend.position = c(0.2, 0.8)
+  ) +
+  
+  labs(
+    x = "Liczba punktów scoringowych",
+    y = "Gęstość",
+    title = "Rozkład punktów scoringowych według grupy klienta",
+    subtitle = "Wynik scoringowy jest liczbową miarą wiarygodności kredytowej klienta.\nWyższa liczba punktów oznacza niższe ryzyko kredytowe."
+  )
+```
+
+Na wykresie widoczne jest przesunięcie rozkładu punktów scoringowych dobrych klientów w stronę wyższych wartości. Oznacza to, że model częściej przypisuje wyższe wyniki osobom należącym do grupy dobrych kredytobiorców. Z kolei rozkład punktów dla złych klientów jest przesunięty w stronę niższych wartości, co wskazuje na większe przewidywane ryzyko kredytowe w tej grupie.
+
+Rozkłady obu grup częściowo się jednak nakładają, co oznacza, że model nie rozdziela klientów dobrych i złych w sposób idealny. Część złych kredytobiorców otrzymuje stosunkowo wysoką punktację, a część dobrych klientów uzyskuje niższe wartości `score`. Potwierdza to koniczność wyznaczenia punktu odcięcia.
+
+Podsumowując, przeprowadzona procedura pozwoliła przekształcić model regresji logistycznej w kartę punktową. Każdemu kredytobiorcy przypisano końcowy wynik scoringowy, który można interpretować jako syntetyczną miarę wiarygodności kredytowej. Wyższa liczba punktów oznacza niższe ryzyko kredytowe, natomiast niższa liczba punktów wskazuje na większe prawdopodobieństwo niewywiązania się ze zobowiązania.
+
+Uzyskana punktacja została wykorzystana w kolejnym etapie do wyznaczenia punktu odcięcia, czyli granicznej wartości `score`, na podstawie której klient zostanie zaklasyfikowany jako akceptowany lub odrzucony w procesie kredytowym.
+
+
+# Punkt odcięcia
+
+Po wyznaczeniu punktów scoringowych kolejnym etapem jest określenie punktu odcięcia, czyli granicznej wartości score, na podstawie której klient zostaje przypisany do jednej z dwóch grup decyzyjnych. W przypadku analizowanego modelu wyższa wartość punktów scoringowych oznacza niższe ryzyko kredytowe, dlatego klienci z wynikiem większym lub równym punktowi odcięcia będą klasyfikowani jako zaakceptowani, natomiast klienci z wynikiem niższym od tej wartości jako odrzuceni.
+
+Punkt odcięcia wyznaczono empirycznie na podstawie krzywej ROC. Zastosowano kryterium Youdena, które polega na wyborze takiego progu, dla którego suma czułości i swoistości jest największa. Innymi słowy, wybrany zostaje próg zapewniający możliwie najlepszy kompromis pomiędzy poprawnym rozpoznawaniem dobrych klientów a poprawnym odrzucaniem klientów złych.
+
+```{r echo=FALSE}
+# ==============================================================================
+# WYZNACZENIE PUNKTU ODCIĘCIA
+# ==============================================================================
+
+# Upewniamy się, że zmienna celu ma postać numeryczną:
+# 1 - dobry klient
+# 0 - zły klient
+scoring_klientow <- scoring_klientow %>%
+  mutate(
+    klasa_num = as.numeric(as.character(klasa))
+  )
+
+# Krzywa ROC dla punktów scoringowych
+# Wyższy score oznacza większe prawdopodobieństwo bycia dobrym klientem
+roc_score <- roc(
+  response = scoring_klientow$klasa_num,
+  predictor = scoring_klientow$score,
+  levels = c(0, 1),
+  direction = "<",
+  quiet = TRUE
+)
+
+# Wyznaczenie optymalnego punktu odcięcia metodą Youdena
+cutoff_youden <- coords(
+  roc_score,
+  x = "best",
+  best.method = "youden",
+  ret = c("threshold", "sensitivity", "specificity"),
+  transpose = FALSE
+)
+
+punkt_odciecia_tabela <- data.frame(
+  `Punkt odcięcia` = 877.5,
+  `Punkt odcięcia po zaokrągleniu` = 878,
+  `Czułość` = 0.710,
+  `Swoistość` = 0.790,
+  check.names = FALSE
+)
+
+knitr::kable(
+  punkt_odciecia_tabela,
+  caption = "Punkt odcięcia wyznaczony na podstawie kryterium Youdena",
+  digits = 3
+)
+```
+
+
+
+Na podstawie kryterium Youdena otrzymano optymalny punkt odcięcia dla wartości `score` równy 877,5 - w zaokrągleniu 878. Dla tego progu czułość modelu wynosi 0,71, nastomiast swoistość 0,79. Oznacza to, że model poprawnie klasyfikuje około 71% dobrych klientów oraz poprawnie odrzuca około 79% złych klientów. 
+
+Klienci z wynikiem co najmniej równym wyznaczonemu progowi zostaną uznani za mniej ryzykownych, natomiast klienci z wynikiem poniżej tej wartości zostaną potraktowani jako bardziej ryzykowni.
+
+
+```{r echo=FALSE, warning=FALSE}
+# KRZYWA ROC Z OPTYMALNYM PUNKTEM ODCIĘCIA
+
+df_roc <- data.frame(
+  Specificity = roc_score$specificities,
+  Sensitivity = roc_score$sensitivities
+)
+
+ggplot(df_roc, aes(x = 1 - Specificity, y = Sensitivity)) +
+  geom_line(color = "blue", size = 1.2) +
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "grey") +
+  # Zaznaczenie punktu optymalnego kropką na krzywej ROC
+  geom_point(aes(x = 1 - cutoff_youden$specificity, y = cutoff_youden$sensitivity), color = "red", size = 4) +
+  annotate("text", x = 1 - cutoff_youden$specificity + 0.15, y = cutoff_youden$sensitivity - 0.05, 
+           label = paste("Optymalny próg:\n", round(cutoff_youden$threshold), "pkt"), color = "red", fontface = "bold") +
+  labs(
+    title = "Krzywa ROC z optymalnym punktem odcięcia",
+    x = "1 - Specyficzność (False Positive Rate)",
+    y = "Czułość (True Positive Rate)"
+  ) +
+  theme_bw() +
+  theme(plot.title = element_text(face = "bold", hjust = 0.5))
+```
+
+Wykres prezentuje krzywą ROC, która obrazuje globalną jakość dyskryminacyjną modelu scoringowego. Oś pionowa przedstawia czułość modelu, natomiast oś pozioma reprezentuje dopełnienie specyficzności, czyli wskaźnik fałszywych alarmów. Niebieska linia modelu wyraźnie i mocno odchyla się od szarej linii przekątnej (oznaczającej wybór całkowicie losowy), co potwierdza wysoką moc predykcyjną i stabilność opracowanego algorytmu klasyfikacyjnego. Czerwony punkt węzłowy wskazuje matematycznie wyznaczony optymalny próg odcięcia na poziomie 878 punktów, który reprezentuje najlepszy możliwy kompromis (np. według kryterium Youdena) pomiędzy maksymalizacją wykrywania dłużników a minimalizacją ryzyka błędnego odrzucenia klientów o dobrej historii kredytowej.
+
+## Klasyfikacja klientów na podstawie punktu odcięcia
+
+Na podstawie wyznaczonego punktu odcięcia dokonano klasyfikacji klientów. Przyjęto, że klient, którego wynik scoringowy jest większy lub równy wyznaczonemu punktowi odcięcia, zostaje zaklasyfikowany jako klient akceptowany. Natomiast klient z wynikiem niższym od tej wartości zostaje zaklasyfikowany jako klient odrzucony.
+
+```{r echo = FALSE}
+# Klasyfikacja klientów na podstawie punktu odcięcia
+punkt_odciecia <- 878
+
+scoring_klientow <- scoring_klientow %>%
+  mutate(
+    decyzja = ifelse(score >= punkt_odciecia, "zaakceptowany", "odrzucony")
+  )
+
+# Tabela klasyfikacji klientów według rzeczywistej klasy i decyzji modelu
+tabela_klasyfikacji <- scoring_klientow %>%
+  count(klasa_opis, decyzja) %>%
+  tidyr::pivot_wider(
+    names_from = decyzja,
+    values_from = n,
+    values_fill = 0
+  ) %>%
+  select(
+    klasa_opis,
+    odrzucony,
+    zaakceptowany
+  )
+
+knitr::kable(
+  tabela_klasyfikacji,
+  caption = "Klasyfikacja klientów na podstawie punktu odcięcia",
+  col.names = c(
+    "Rzeczywista klasa klienta",
+    "Odrzucony",
+    "Zaakceptowany"
+  )
+)
+```
+
+Na podstawie przyjętego punktu odcięcia o wartośći 878 model zaakceptował 497 dobrych klientów oraz odrzucił 237 złych klientów. Są to decyzje poprawne. Jednocześnie 203 dobrych klientów zostało błędnie odrzuconych, a 63 złych klientów zostało błędnie zaakceptowanych. Wyniki te pokazują, że model częściej poprawnie identyfikuje klientów złych niż błędnie ich akceptuje, jednak nie eliminuje całkowicie ryzyka niepoprawnej decyzji.
+
+## Miary jakości dla wybranego punktu odcięcia
+
+Po dokonaniu klasyfikacji klientów na podstawie wybranego punktu odcięcia oceniono jakość uzyskanych decyzji. W tym celu obliczono podstawowe miary klasyfikacji, które pozwalają określić, jaka część klientów została przypisana do właściwej grupy oraz jaki udział klientów został zaakceptowany lub odrzucony przez model.
+
+```{r echo=FALSE}
+# Dobre klienty zaakceptowane
+TP <- sum(scoring_klientow$klasa_num == 1 & scoring_klientow$decyzja == "zaakceptowany")
+
+# Źli klienci odrzuceni
+TN <- sum(scoring_klientow$klasa_num == 0 & scoring_klientow$decyzja == "odrzucony")
+
+# Źli klienci zaakceptowani
+FP <- sum(scoring_klientow$klasa_num == 0 & scoring_klientow$decyzja == "zaakceptowany")
+
+# Dobrzy klienci odrzuceni
+FN <- sum(scoring_klientow$klasa_num == 1 & scoring_klientow$decyzja == "odrzucony")
+
+accuracy <- (TP + TN) / (TP + TN + FP + FN)
+sensitivity <- TP / (TP + FN)
+specificity <- TN / (TN + FP)
+
+approval_rate <- mean(scoring_klientow$decyzja == "zaakceptowany")
+rejection_rate <- mean(scoring_klientow$decyzja == "odrzucony")
+
+bad_rate_accepted <- scoring_klientow %>%
+  filter(decyzja == "zaakceptowany") %>%
+  summarise(bad_rate = mean(klasa_num == 0)) %>%
+  pull(bad_rate)
+
+bad_rate_rejected <- scoring_klientow %>%
+  filter(decyzja == "odrzucony") %>%
+  summarise(bad_rate = mean(klasa_num == 0)) %>%
+  pull(bad_rate)
+
+metryki_punkt_odciecia <- tibble(
+  pkt_odciecia = punkt_odciecia,
+  accuracy = accuracy,
+  sensitivity = sensitivity,
+  specificity = specificity,
+  approval_rate = approval_rate,
+  rejection_rate = rejection_rate,
+  bad_rate_ac = bad_rate_accepted,
+  bad_rate_re = bad_rate_rejected
+) %>%
+  mutate(
+    across(where(is.numeric), ~ round(.x, 3))
+  )
+
+metryki_punkt_odciecia %>%
+  knitr::kable(
+    caption = "Miary jakości klasyfikacji dla wybranego punktu odcięcia"
+  )
+```
+
+W tabeli przedstawiono podstawowe miary jakości klasyfikacji uzyskane dla wybranego punktu odcięcia. Wartość `accuracy` informuje o ogólnym odsetku poprawnych klasyfikacji. Czułość, czyli `sensitivity`, określa, jaka część dobrych klientów została poprawnie zaakceptowana. Swoistość, czyli `specificity`, informuje natomiast, jaka część złych klientów została poprawnie odrzucona.
+
+Dodatkowo obliczono udział zaakceptowanych i odrzuconych klientów. Wartość `approval_rate` pokazuje, jaki odsetek wszystkich klientów zostałby zaakceptowany przy danym progu, natomiast `rejection_rate` wskazuje odsetek klientów odrzuconych. Szczególnie ważna jest wartość `bad_rate_ac`, ponieważ pokazuje, jaki udział wśród zaakceptowanych klientów stanowią osoby faktycznie należące do grupy złych kredytobiorców. Natomiast wartość `bad_rate_re` informuje, jaki udział wśród odrzuconych kredytobiorców stanowią źli klienci.
+
+Dla punktu odcięcia równego 877,5 ogólna trafność klasyfikacji wyniosła 0,734, co oznacza, że model poprawnie zaklasyfikował około 73,4% wszystkich klientów. Czułość równa 0,710 wskazuje, że poprawnie zaakceptowano 71% dobrych klientów. Swoistość wynosząca 0,79 oznacza natomiast, że poprawnie odrzucono 79,0% złych klientów.
+
+Przy analizowanym progu zaakceptowanych zostało 56% klientów, natomiast 44% zostało odrzuconych. Wśród zaakceptowanych klientów udział osób faktycznie należących do grupy złych kredytobiorców wyniósł 11,2%. Jest to szczególnie istotna miara z punktu widzenia ryzyka kredytowego, ponieważ pokazuje, jaka część zaakceptowanego portfela może generować potencjalne straty. Z kolei wśród klientów odrzuconych 53,9% stanowili źli kredytobiorcy, co potwierdza, że model skutecznie przesuwa bardziej ryzykowne obserwacje do grupy odrzuconych.
+
+### Wykres rozkładu score z punktem odcięcia
+```{r echo=FALSE}
+ggplot(scoring_klientow, aes(x = score, fill = klasa_opis, color = klasa_opis)) +
+  geom_density(alpha = 0.3, linewidth = 1) +
+  geom_vline(
+    xintercept = punkt_odciecia,
+    linetype = "dashed",
+    linewidth = 1,
+    color = "black"
+  ) +
+  annotate(
+    "text",
+    x = punkt_odciecia,
+    y = Inf,
+    label = paste0("Punkt odcięcia = ", round(punkt_odciecia, 0)),
+    vjust = 1.5,
+    hjust = -0.1,
+    size = 4
+  ) +
+  scale_color_manual(
+    values = c(
+      "zły klient" = "red",
+      "dobry klient" = "blue"
+    )
+  ) +
+  scale_fill_manual(
+    values = c(
+      "zły klient" = "red",
+      "dobry klient" = "blue"
+    )
+  ) +
+  theme_minimal() +
+  theme(
+    legend.title = element_blank(),
+    legend.position = c(0.2, 0.8)
+  ) +
+  labs(
+    x = "Liczba punktów scoringowych",
+    y = "Gęstość",
+    title = "Rozkład punktów scoringowych z wyznaczonym punktem odcięcia",
+    subtitle = "Klienci z wynikiem co najmniej równym punktowi odcięcia są klasyfikowani jako zaakceptowani."
+  )
+```
+
+Wykres przedstawia rozkład punktów scoringowych w grupie dobrych i złych klientów wraz z wyznaczonym punktem odcięcia. Linia przerywana oznacza punkt odciącia, na podstawie którego podejmowana jest decyzja klasyfikacyjna. Obserwacje po prawej stronie tej linii są traktowane jako klienci zaakceptowani, natomiast obserwacje po lewej stronie jako klienci odrzuceni.
+
+Wykres pokazuje, że większa część dobrych klientów znajduje się po stronie akceptacji, co oznacza, że model poprawnie przypisuje im wyższe wartości `score`. Jednocześnie znaczna część złych klientów znajduje się po stronie odrzucenia, co wskazuje na zdolność modelu do identyfikowania bardziej ryzykownych kredytobiorców. Rozkłady obu grup częściowo się jednak nakładają, dlatego część dobrych klientów zostaje błędnie odrzucona, a część złych klientów błędnie zaakceptowana. Oznacza to, że punkt odcięcia stanowi kompromis pomiędzy ograniczaniem ryzyka kredytowego a utrzymaniem odpowiedniego poziomu akceptacji klientów.
+
+### Porównanie kilku możliwych punktów odcięcia
+```{r echo=FALSE}
+progi_score <- quantile(
+  scoring_klientow$score,
+  probs = seq(0.1, 0.9, by = 0.1),
+  na.rm = TRUE
+)
+
+porownanie_progów <- map_dfr(progi_score, function(prog) {
+  
+  decyzja_tmp <- ifelse(scoring_klientow$score >= prog, "zaakceptowany", "odrzucony")
+  
+  TP_tmp <- sum(scoring_klientow$klasa_num == 1 & decyzja_tmp == "zaakceptowany")
+  TN_tmp <- sum(scoring_klientow$klasa_num == 0 & decyzja_tmp == "odrzucony")
+  FP_tmp <- sum(scoring_klientow$klasa_num == 0 & decyzja_tmp == "zaakceptowany")
+  FN_tmp <- sum(scoring_klientow$klasa_num == 1 & decyzja_tmp == "odrzucony")
+  
+  tibble(
+    prog = prog,
+    accuracy = (TP_tmp + TN_tmp) / (TP_tmp + TN_tmp + FP_tmp + FN_tmp),
+    sensitivity = TP_tmp / (TP_tmp + FN_tmp),
+    specificity = TN_tmp / (TN_tmp + FP_tmp),
+    approval_rate = mean(decyzja_tmp == "zaakceptowany"),
+    bad_rate_accepted = mean(scoring_klientow$klasa_num[decyzja_tmp == "zaakceptowany"] == 0)
+  )
+}) %>%
+  mutate(
+    across(where(is.numeric), ~ round(.x, 3))
+  )
+
+porownanie_progów %>%
+  knitr::kable(
+    caption = "Porównanie jakości klasyfikacji dla różnych punktów odcięcia"
+  )
+```
+
+Dodatkowo porównano kilka alternatywnych wartości punktu odcięcia opartych na kwantylach rozkładu `score`. Takie zestawienie pozwala sprawdzić, jak zmieniają się miary klasyfikacji przy bardziej liberalnych lub bardziej restrykcyjnych progach akceptacji. Niższy próg powoduje zaakceptowanie większej liczby klientów, ale może zwiększać udział złych kredytobiorców wśród zaakceptowanych. Wyższy próg zmniejsza ryzyko portfela zaakceptowanych klientów, ale jednocześnie prowadzi do odrzucenia większej liczby wniosków.
+
+Ostateczny wybór punktu odcięcia zależy więc nie tylko od własności statystycznych modelu, ale również od strategii instytucji finansowej. W niniejszej analizie jako podstawowy punkt odcięcia przyjęto wartość wyznaczoną metodą Youdena, ponieważ stanowi ona kompromis pomiędzy poprawną akceptacją dobrych klientów a poprawnym odrzucaniem klientów złych.
+
+```{r echo=FALSE}
+# Tworzymy nową ramkę danych
+dane_z_punktami <- data.frame(
+  score = scoring_klientow$score_dokladny,
+  klasa = scoring_klientow$klasa
+)
+
+# Dodanie etykiety tekstowej (1 = Dobry, 0 = Zły)
+dane_z_punktami$Etykieta_Klasy <- ifelse(
+  dane_z_punktami$klasa == 1,
+  "Dobry klient",
+  "Zły klient"
+)
+
+# Podstawowe statystyki punktów scoringowych
+statystyki_score <- dane_z_punktami %>%
+  summarise(
+    Minimum = min(score, na.rm = TRUE),
+    `I kwartyl` = quantile(score, 0.25, na.rm = TRUE),
+    Mediana = median(score, na.rm = TRUE),
+    Średnia = mean(score, na.rm = TRUE),
+    `III kwartyl` = quantile(score, 0.75, na.rm = TRUE),
+    Maksimum = max(score, na.rm = TRUE)
+  )
+
+knitr::kable(
+  statystyki_score,
+  caption = "Podstawowe statystyki punktów scoringowych",
+  digits = 2
+)
+```
+```{r echo=FALSE}
+# POZIOM AKCEPTACJI + UDZIAŁ ZŁYCH PRZYPADKÓW
+
+# Definiujemy siatkę punktów odcięcia z parametrem kroku (np. co 10 punktów)
+krok_punktowy <- 10 
+progi_cutoff <- seq(floor(min(scoring_klientow$score_dokladny, na.rm=TRUE)), 
+                    ceiling(max(scoring_klientow$score_dokladny, na.rm=TRUE)), 
+                    by = krok_punktowy)
+
+# Łączna liczba wszystkich obserwacji oraz wszystkich złych w bazie
+total_n <- nrow(scoring_klientow)
+total_bad <- sum(scoring_klientow$klasa == 0, na.rm = TRUE)
+
+df_cutoff_analiza <- data.frame(Cutoff = progi_cutoff, Approval_Rate = 0, Bad_Cases_Accepted = 0)
+
+for(i in 1:length(progi_cutoff)) {
+  p <- progi_cutoff[i]
+  
+  # Filtrujemy klientów, którzy uzyskali wynik powyżej lub równy progowi p
+  zaakceptowani <- scoring_klientow %>% filter(score_dokladny >= p)
+  
+  # Poziom akceptacji ogółem: (liczba zaakceptowanych / cała baza) * 100
+  df_cutoff_analiza$Approval_Rate[i] <- (nrow(zaakceptowani) / total_n) * 100
+  
+  # Udział złych przypadków: (liczba zaakceptowanych złych / wszyscy źli w bazie) * 100
+  # Dla najmniejszej liczby punktów zaakceptujemy wszystkich złych, dając wynik 100%
+  df_cutoff_analiza$Bad_Cases_Accepted[i] <- (sum(zaakceptowani$klasa == 0) / total_bad) * 100
+}
+
+df_cutoff_long <- df_cutoff_analiza %>%
+  pivot_longer(cols = c(Approval_Rate, Bad_Cases_Accepted), names_to = "Miernik", values_to = "Procent")
+
+ggplot(df_cutoff_long, aes(x = Cutoff, y = Procent, color = Miernik)) +
+  geom_line(size = 1.2) +
+  geom_point(size = 1.5) +
+  scale_y_continuous(breaks = seq(0, 100, by = 10), labels = paste0(seq(0, 100, by = 10), "%")) +
+  scale_color_manual(
+    values = c("Approval_Rate" = "#2980b9", "Bad_Cases_Accepted" = "#d35400"),
+    labels = c("Poziom akceptacji ogółem (Approval Rate)", "Udział przechodzących złych przypadków")
+  ) +
+  labs(
+    title = "Poziom akceptacji i udział złych przypadków w punkcie odcięcia",
+    subtitle = "Dla minimalnego progu obie wartości startują z poziomu 100%",
+    x = "Punkt odcięcia (Cut-off Score)",
+    y = "Wartość procentowa (%)",
+    color = "Wskaźnik:"
+  ) +
+  theme_bw() +
+  theme(
+    plot.title = element_text(face = "bold", hjust = 0.5), 
+    legend.position = "bottom"
+  )
+```
+
+Wykres ilustruje relację pomiędzy punktem odcięcia, wyrażonym w punktach scoringowych na osi poziomej, a dwoma kluczowymi wskaźnikami operacyjnymi banku, wyrażonymi w procentach na osi pionowej. Niebieska linia reprezentuje ogólny poziom akceptacji wniosków kredytowych (Approval Rate), natomiast linia czerwona odzwierciedla odsetek „złych” klientów, którzy przy danym progu punktowym zostaliby dopuszczeni do portfela. Wykres wyraźnie pokazuje klasyczny kompromis (trade-off) w zarządzaniu ryzykiem kredytowym: podnoszenie minimalnego progu scoringowego (przesunięcie w prawo) skutecznie i gwałtownie ogranicza liczbę akceptowanych złych przypadków (np. przy progu 850 punktów przepuszczamy już tylko ok. 35% złych klientów), ale odbywa się to kosztem restrykcyjności polityki kredytowej i spadku całkowitej liczby zatwierdzanych wniosków (Approval Rate spada w tym samym miejscu do ok. 65%).
+
+```{r echo=FALSE}
+# SKUMULOWANY UDZIAŁ DOBRYCH I ZŁYCH (OD 100% W DÓŁ)
+
+punkty_siatka <- sort(unique(floor(scoring_klientow$score_dokladny)))
+
+total_good <- sum(scoring_klientow$klasa == 1)
+total_bad  <- sum(scoring_klientow$klasa == 0)
+
+df_skumulowany <- data.frame(Score = punkty_siatka, Skumulowany_Dobrzy = 0, Skumulowany_Zli = 0)
+
+for(i in 1:length(punkty_siatka)) {
+  p <- punkty_siatka[i]
+  # Liczymy ile osób ma punkty WIĘKSZE LUB RÓWNE progowi p
+  df_skumulowany$Skumulowany_Dobrzy[i] <- (sum(scoring_klientow$klasa == 1 & scoring_klientow$score_dokladny >= p) / total_good) * 100
+  df_skumulowany$Skumulowany_Zli[i]    <- (sum(scoring_klientow$klasa == 0 & scoring_klientow$score_dokladny >= p) / total_bad) * 100
+}
+
+df_skumulowany_long <- df_skumulowany %>%
+  pivot_longer(cols = c(Skumulowany_Dobrzy, Skumulowany_Zli), names_to = "Grupa", values_to = "Procent_Skumulowany")
+
+ggplot(df_skumulowany_long, aes(x = Score, y = Procent_Skumulowany, color = Grupa)) +
+  geom_line(size = 1.2) +
+  scale_y_continuous(breaks = seq(0, 100, by = 10), labels = paste0(seq(0, 100, by = 10), "%")) +
+  scale_color_manual(
+    values = c("Skumulowany_Dobrzy" = "#2ecc71", "Skumulowany_Zli" = "#e74c3c"),
+    labels = c("Klienci Dobrzy (1)", "Klienci Zli (0)")
+  ) +
+  labs(
+    title = "Skumulowany procentowy udział przypadków",
+    subtitle = "Dla minimalnej liczby punktów udział wynosi 100%",
+    x = "Punkty",
+    y = "Skumulowany procent przypadków (>= Score)",
+    color = "Grupa:"
+  ) +
+  theme_bw() +
+  theme(plot.title = element_text(face = "bold", hjust = 0.5), legend.position = "bottom")
+```
+
+Wykres przedstawia skumulowany procentowy udział przypadków klientów „dobrych” (linia zielona) oraz „złych” (linia czerwona) w zależności od liczby punktów scoringowych uzyskanych przez kredytobiorców. Oś pozioma prezentuje rozkład punktowy, natomiast oś pionowa pokazuje, jaki odsetek danej podpopulacji osiąga wynik równy lub wyższy od wskazanej wartości ($\ge Score$). Wykres ten obrazuje naturalną zdolność separacyjną wypracowanej karty scoringowej, krzywa dla klientów dobrych wyraźnie i stabilnie przebiega nad krzywą klientów złych. Oznacza to, że w przedziałach wyższych ocen punktowych (np. powyżej 850–900 punktów) gwałtownie spada skumulowany udział klientów złych (zostaje ich zaledwie ok. 10–20%), podczas gdy w portfelu wciąż utrzymuje się bardzo wysoki odsetek klientów dobrych (ok. 60-75%), co pozwala na bezpieczne odcięcie ryzyka przy minimalnej stracie dobrych wniosków.
+
+```{r echo=FALSE}
+# SKUMULOWANY ZYSK FINANSOWY DLA PORTFELA (>= SCORE)
+
+# Założenia finansowe
+zysk_dobry <- 150
+strata_zly <- -400
+
+# Pobieramy unikalne i posortowane wartości z kolumny score
+unikalne_punkty <- sort(unique(scoring_klientow$score))
+
+df_zysk_skumulowany <- data.frame(Score_Cutoff = unikalne_punkty, Skumulowany_Zysk = 0)
+
+for(i in 1:length(unikalne_punkty)) {
+  prog <- unikalne_punkty[i]
+  
+  # Filtrujemy portfel: bierzemy WSZYSTKIE obiekty WIĘKSZE BĄDŹ RÓWNE progowi prog
+  zaakceptowany_portfel <- scoring_klientow %>% filter(score >= prog)
+  
+  # Sumujemy zyski i straty dla całego tak odciętego portfela
+  if(nrow(zaakceptowany_portfel) > 0) {
+    dobrzy <- sum(zaakceptowany_portfel$klasa == 1)
+    zli <- sum(zaakceptowany_portfel$klasa == 0)
+    df_zysk_skumulowany$Skumulowany_Zysk[i] <- (dobrzy * zysk_dobry) + (zli * strata_zly)
+  }
+}
+
+# Znajdujemy punkt, który maksymalizuje skumulowany zysk (szczyt paraboli)
+najlepszy_punkt <- df_zysk_skumulowany$Score_Cutoff[which.max(df_zysk_skumulowany$Skumulowany_Zysk)]
+max_profit <- max(df_zysk_skumulowany$Skumulowany_Zysk)
+
+ggplot(df_zysk_skumulowany, aes(x = Score_Cutoff, y = Skumulowany_Zysk)) +
+  geom_line(color = "#27ae60", size = 1.3) +
+  geom_point(color = "#2ecc71", size = 2) +
+  
+  # Dodanie pionowej linii wskazującej optymalny punkt odcięcia na osi X
+  geom_vline(xintercept = najlepszy_punkt, color = "#c0392b", linetype = "dashed", size = 1) +
+  
+  # Pozioma linia zero (granica rentowności)
+  geom_hline(yintercept = 0, linetype = "dotted", color = "grey40") +
+  
+  labs(
+    title = "Skumulowany zysk finansowy według punktacji",
+    subtitle = paste("Maksymalny zysk osiągany dla punktu odcięcia >=", najlepszy_punkt),
+    x = "Punkt odcięcia (score)",
+    y = "Całkowity zysk z zaakceptowanego portfela"
+  ) +
+  annotate("text", x = najlepszy_punkt + 20, y = max_profit * 0.9, 
+           label = paste("Optimum:", najlepszy_punkt, "pkt"), 
+           color = "#c0392b", fontface = "bold", hjust = 0) +
+  theme_bw() +
+  theme(
+    plot.title = element_text(face = "bold", hjust = 0.5, size = 14),
+    axis.text = element_text(face = "bold", size = 10)
+  )
+```
+
+Wykres ilustruje całkowity skumulowany zysk finansowy generowany przez zaakceptowany portfel kredytowy w zależności od wybranego punktu odcięcia. Oś pozioma prezentuje minimalny próg punktowy wymagany do przyznania kredytu, natomiast oś pionowa odzwierciedla wynik finansowy instytucji. Zielona krzywa doskonale obrazuje ekonomiczne skutki decyzji biznesowych: zbyt niski próg (poniżej 700 punktów) skutkuje stratami z powodu nadmiernej liczby niespłacanych kredytów, z kolei zbyt rygorystyczny próg (powyżej 1000 punktów) odcina zyski przez masowe odrzucanie dobrych klientów. Maksymalna efektywność ekonomiczna portfela i najwyższy zysk finansowy są osiągane przy wyznaczonym przez pionową, przerywaną linię optymalnym punkcie odcięcia na poziomie 881 punktów, co stanowi kluczową wytyczną do ostatecznego wdrożenia produkcyjnego strategii skoringowej. Wartość ta jest bardzo zbliżona do punktu odcięcia wyznaczonego metodą Youdena, który wynosi 878 punktów. Oznacza to, że próg statystyczny i próg ekonomiczny prowadzą do podobnych wniosków decyzyjnych.
+
+Należy jednak rozróżnić oba podejścia. Próg o wartości 878 został wybrany na podstawie własności klasyfikacyjnych modelu, czyli kompromisu między czułością i swoistością. Próg o wartości 881 wynika natomiast z kryterium ekonomicznego, w którym celem jest maksymalizacja zysku z portfela zaakceptowanych klientów. Ponieważ obie wartości są bardzo bliskie, można uznać, że przyjęty punkt odcięcia jest uzasadniony zarówno statystycznie, jak i biznesowo.
+
+
+# Analiza przeżycia
+
+W końcowej części analizy zastosowano elementy analizy przeżycia. W klasycznym ujęciu analiza przeżycia służy do badania czasu do wystąpienia określonego zdarzenia, np. czasu do niewypłacalności klienta. W analizowanym zbiorze danych nie występuje jednak bezpośrednia zmienna określająca dokładny moment pojawienia się niewypłacalności. Dostępna jest natomiast zmienna `czas_trwania`, określająca czas trwania kredytu w miesiącach, oraz zmienna `klasa`, wskazująca, czy klient został zaklasyfikowany jako dobry czy zły.
+
+Z tego względu analizę przeżycia potraktowano jako podejście pomocnicze. Za czas obserwacji przyjęto czas przerwania trwania kredytu wyznaczona sztucznie, natomiast za zdarzenie uznano przynależność klienta do grupy złych kredytobiorców. Klienci dobrzy zostali potraktowani jako obserwacje ocenzurowane, czyli takie, dla których w trakcie obserwacji nie wystąpiło analizowane zdarzenie.
+
+## Przygotowanie danych do analizy przeżycia
+
+W pierwszym kroku przygotowano zbiór danych zawierający czas obserwacji oraz informację o wystąpieniu zdarzenia. Zmienna `czas` odpowiada czasowi przerwania trwania kredytu w miesiącach. Zmienna `zdarzenie` przyjmuje wartość 1 dla złych klientów oraz 0 dla dobrych klientów. Oznacza to, że zdarzeniem jest zaklasyfikowanie kredytobiorcy jako klienta złego.
+
+```{r echo=FALSE}
+dane_surv <- scoring_klientow %>%
+  mutate(
+    klasa_num = as.numeric(as.character(klasa)),
+    czas = dane$czas,
+    zdarzenie = ifelse(klasa_num == 0, 1, 0),
+    klasa_opis = case_when(
+      klasa_num == 0 ~ "zły klient",
+      klasa_num == 1 ~ "dobry klient"
+    )
+  )
+
+# Podgląd przygotowanych danych
+head(
+  dane_surv %>%
+    select(czas, zdarzenie, klasa_opis, score, PD_bad)
+)
+```
+
+## Liczba zdarzeń i obserwacji ocenzurowanych
+```{r echo=FALSE}
+tabela_zdarzen <- dane_surv %>%
+  group_by(klasa_opis, zdarzenie) %>%
+  summarise(
+    liczba = n(),
+    .groups = "drop"
+  )
+
+tabela_zdarzen %>%
+  knitr::kable(
+    caption = "Liczba zdarzeń i obserwacji ocenzurowanych w analizie przeżycia"
+  )
+```
+
+W tabeli przedstawiono liczbę obserwacji, dla których wystąpiło analizowane zdarzenie, oraz liczbę obserwacji ocenzurowanych. W tym ujęciu wystąpienie zdarzenia oznacza przynależność do grupy złych kredytobiorców, natomiast obserwacje ocenzurowane odpowiadają klientom dobrym.
+
+## Estymator Kaplana-Meiera
+
+Do oszacowania funkcji przeżycia zastosowano estymator Kaplana-Meiera. Funkcja przeżycia opisuje prawdopodobieństwo niewystąpienia analizowanego zdarzenia do określonego momentu. W tym przypadku można ją interpretować jako prawdopodobieństwo, że klient nie zostanie zaklasyfikowany jako zły do danego czasu przerwania trwania kredytu.
+
+```{r}
+surv_object <- Surv(
+  time = dane_surv$czas,
+  event = dane_surv$zdarzenie
+)
+
+km_model <- survfit(surv_object ~ 1, data = dane_surv)
+
+summary(km_model)
+```
+## Wykres funkcji przeżycia dla całej próby
+```{r echo=FALSE, fig.height=6, fig.width=8, message=FALSE, warning=FALSE}
+ggsurvplot(
+  km_model,
+  data = dane_surv,
+  conf.int = TRUE,
+  risk.table = TRUE,
+  xlab = "Czas trwania kredytu [miesiące]",
+  ylab = "Prawdopodobieństwo niewystąpienia zdarzenia",
+  title = "Krzywa przeżycia Kaplana-Meiera dla całej próby",
+  risk.table.height = 0.25
+)
+```
+
+Krzywa Kaplana-Meiera przedstawia, jak zmienia się prawdopodobieństwo niewystąpienia zdarzenia wraz ze wzrostem czasu przerwania trwania kredytu. Spadek krzywej oznacza pojawianie się kolejnych zdarzeń, czyli przypadków zaklasyfikowanych jako źli kredytobiorcy. Im wolniej opada krzywa, tym większe prawdopodobieństwo pozostania w grupie bez zdarzenia.
+
+## Analiza przeżycia według grup ryzyka scoringowego
+
+Następnie sprawdzono, czy klienci o różnych poziomach punktacji scoringowej różnią się przebiegiem krzywych przeżycia. W tym celu podzielono klientów na trzy grupy ryzyka na podstawie wartości score. Najniższe wartości score odpowiadają najwyższemu ryzyku, natomiast najwyższe wartości score odpowiadają najniższemu ryzyku.
+
+```{r echo=FALSE}
+dane_surv <- dane_surv %>%
+  mutate(
+    grupa_score = ntile(score, 3),
+    grupa_ryzyka = case_when(
+      grupa_score == 1 ~ "wysokie ryzyko",
+      grupa_score == 2 ~ "średnie ryzyko",
+      grupa_score == 3 ~ "niskie ryzyko"
+    ),
+    grupa_ryzyka = factor(
+      grupa_ryzyka,
+      levels = c("wysokie ryzyko", "średnie ryzyko", "niskie ryzyko")
+    )
+  )
+
+dane_surv %>%
+  group_by(grupa_ryzyka) %>%
+  summarise(
+    liczba = n(),
+    score_min = min(score),
+    score_max = max(score),
+    sredni_score = mean(score),
+    liczba_zdarzen = sum(zdarzenie),
+    odsetek_zdarzen = mean(zdarzenie),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    across(where(is.numeric), ~ round(.x, 3))
+  ) %>%
+  knitr::kable(
+    caption = "Charakterystyka grup ryzyka wyznaczonych na podstawie punktów scoringowych"
+  )
+```
+
+## Model Kaplana-Meiera według grup ryzyka
+```{r echo=FALSE, fig.height=6, fig.width=10, message=FALSE, warning=FALSE}
+km_grupy <- survfit(
+  Surv(czas, zdarzenie) ~ grupa_ryzyka,
+  data = dane_surv
+)
+
+ggsurvplot(
+  km_grupy,
+  data = dane_surv,
+  conf.int = TRUE,
+  risk.table = TRUE,
+  pval = TRUE,
+  xlab = "Czas przerwania trwania kredytu [miesiące]",
+  ylab = "Prawdopodobieństwo niewystąpienia zdarzenia",
+  title = "Krzywe Kaplana-Meiera według grup ryzyka scoringowego",
+  legend.title = "Grupa ryzyka",
+  risk.table.height = 0.25
+)
+```
+
+Na wykresie porównano krzywe przeżycia dla trzech grup ryzyka.
+
+Wykres jednoznacznie potwierdza wysoką jakość predykcyjną karty scoringowej. Krzywe rozszerzają się w sposób usankcjonowany teorią:
+
+Zielona linia (niskie ryzyko, najwyższy score) znajduje się najwyżej – klienci z tej grupy mają najwyższe prawdopodobieństwo poprawnej spłaty w każdym miesiącu.
+
+Czerwona linia (wysokie ryzyko, najniższy score) opada najgwałtowniej, wskazując, że w tej grupie zdarzenia zachodzą najszybciej i najczęściej.
+
+Wartość p na wykresie pochodzi z testu log-rank, który pozwala ocenić, czy różnice między krzywymi przeżycia są statystycznie istotne.
+
+## Test log-rank
+
+Do formalnego porównania krzywych przeżycia między grupami ryzyka zastosowano test log-rank. Hipoteza zerowa zakłada brak różnic między krzywymi przeżycia w analizowanych grupach. Hipoteza alternatywna mówi, że przynajmniej jedna z krzywych różni się od pozostałych.
+
+```{r echo=FALSE}
+test_logrank <- survdiff(
+  Surv(czas, zdarzenie) ~ grupa_ryzyka,
+  data = dane_surv
+)
+
+test_logrank
+```
+
+## Obliczenie p-value dla testu log-rank
+```{r echo=FALSE}
+p_logrank <- 1 - pchisq(
+  test_logrank$chisq,
+  df = length(test_logrank$n) - 1
+)
+
+p_logrank
+```
+
+Jeżeli wartość p jest mniejsza od 0,05, można odrzucić hipotezę zerową o braku różnic między grupami. Oznacza to, że grupy wyznaczone na podstawie punktów scoringowych różnią się przebiegiem funkcji przeżycia. Taki wynik potwierdzałby, że score jest powiązany z ryzykiem kredytowym także w ujęciu czasu przerwania trwania kredytu.
+
+## Model proporcjonalnego hazardu Coxa
+
+Ostatnim krokiem było dopasowanie modelu proporcjonalnego hazardu Coxa. Model ten pozwala ocenić, czy wynik scoringowy wpływa na hazard wystąpienia zdarzenia. Hazard można rozumieć jako chwilowe ryzyko wystąpienia zdarzenia w danym momencie, przy założeniu, że do tego momentu zdarzenie jeszcze nie wystąpiło.
+
+W modelu wykorzystano zmienną `score`. Ponieważ wyższa liczba punktów oznacza niższe ryzyko kredytowe, oczekiwany jest współczynnik hazardu mniejszy od 1. Oznaczałoby to, że wzrost punktacji scoringowej zmniejsza ryzyko wystąpienia zdarzenia.
+
+```{r}
+cox_score <- coxph(
+  Surv(czas, zdarzenie) ~ score,
+  data = dane_surv
+)
+
+summary(cox_score)
+```
+## Hazard ratio dla zmiennej score
+```{r}
+hr_score <- exp(coef(cox_score))
+
+hr_score
+```
+
+Wartość `exp(coef)` jest ilorazem hazardów. Jeżeli dla zmiennej `score` otrzymano wartość mniejszą od 1, oznacza to, że wzrost punktacji scoringowej wiąże się ze spadkiem ryzyka wystąpienia zdarzenia. Innymi słowy, im wyższy wynik scoringowy, tym mniejsze ryzyko zaklasyfikowania klienta jako złego.
+
+Ponieważ score jest mierzony w punktach, warto dodatkowo przeliczyć hazard ratio dla wzrostu score o 50 punktów. Jest to wygodniejsze interpretacyjnie, ponieważ wcześniej przyjęto parametr PDO równy 50 punktów.
+
+## Hazard ratio dla wzrostu score o 50 punktów
+```{r echo=FALSE}
+hr_score_50 <- exp(coef(cox_score) * 50)
+names(hr_score_50) <- "Hazard Ratio (Score +50)"
+round(hr_score_50, 4)
+```
+
+Wartość `hr_score_50` pokazuje, jak zmienia się hazard wystąpienia zdarzenia przy wzroście wyniku scoringowego o 50 punktów. Wartość poniżej 1 oznacza obniżenie ryzyka, natomiast wartość powyżej 1 oznacza wzrost ryzyka.
+
+## Sprawdzenie założenia proporcjonalności hazardów
+
+W modelu Coxa jednym z podstawowych założeń jest proporcjonalność hazardów. Oznacza to, że relacja między grupami lub poziomami zmiennej objaśniającej powinna być względnie stała w czasie. Założenie to sprawdzono przy pomocy testu Schoenfelda.
+
+```{r echo=FALSE}
+test_ph <- cox.zph(cox_score)
+
+test_ph
+```
+
+## Wykres diagnostyczny założenia proporcjonalności hazardów
+```{r echo=FALSE}
+plot(test_ph)
+```
+
+Jeżeli wartość p w teście Schoenfelda jest większa od 0,05, nie ma podstaw do odrzucenia założenia proporcjonalności hazardów. Oznacza to, że model Coxa może być interpretowany w standardowy sposób. W przypadku wartości p poniżej 0,05 założenie proporcjonalności hazardów może być naruszone, dlatego wyniki modelu należy
+interpretować ostrożnie.
+
+Wartość p spadła poniżej progu 0,05,co oznacza, że należy odrzucić hipotezy zerową na rzecz alternatywnej. Wskazuje to na statystycznie istotne naruszenie założenia o proporcjonalności hazardów Oznacza to, że siła predykcyjna punktacji scoringowej nie jest identyczna w każdym miesiącu życia kredytu (np. score silniej różnicuje klientów na początku, a słabiej w późniejszych fazach). W takim przypadku współczynniki modelu Coxa należy interpretować z ostrożnością, jako uśredniony efekt dla całego okresu obserwacji.
+
+## Model Coxa dla grup ryzyka
+
+Dodatkowo dopasowano model Coxa, w którym zmienną objaśniającą jest grupa ryzyka wyznaczona na podstawie punktacji scoringowej. Grupą referencyjną jest grupa wysokiego ryzyka, czyli klienci z najniższymi wartościami score.
+
+```{r}
+cox_grupy <- coxph(
+  Surv(czas, zdarzenie) ~ grupa_ryzyka,
+  data = dane_surv
+)
+
+summary(cox_grupy)
+```
+
+W tym modelu hazardy dla grupy średniego i niskiego ryzyka są porównywane z grupą wysokiego ryzyka. Jeżeli wartości hazard ratio dla tych grup są mniejsze od 1, oznacza to, że klienci ze średnim lub niskim ryzykiem mają niższe ryzyko wystąpienia zdarzenia niż klienci z grupy wysokiego ryzyka.
+
+## Podsumowanie analizy przeżycia
+
+Przeprowadzona analiza przeżycia miała charakter uzupełniający względem klasycznej oceny modelu scoringowego. Pozwoliła ona sprawdzić, czy punktacja scoringowa różnicuje klientów również w ujęciu czasu przerwania trwania kredytu. Wykorzystano estymator Kaplana-Meiera, test log-rank oraz model proporcjonalnego hazardu Coxa.
+
+Jeżeli krzywe przeżycia dla grup ryzyka różnią się między sobą, a model Coxa wskazuje na istotny wpływ score na hazard wystąpienia zdarzenia, można uznać, że wynik scoringowy dobrze porządkuje klientów pod względem ryzyka kredytowego. Wyższa punktacja powinna wiązać się z niższym hazardem zdarzenia, czyli mniejszym ryzykiem zaklasyfikowania klienta jako złego.
+
+Należy jednak podkreślić, że analiza ta ma ograniczenia interpretacyjne. Zbiór danych nie zawiera dokładnego czasu do defaultu, dlatego zmienna `czas` została stworzona sztucznie. Z tego względu wyniki analizy przeżycia należy traktować jako dodatkowe narzędzie oceny modelu, a nie jako pełną analizę czasu do niewypłacalności.
